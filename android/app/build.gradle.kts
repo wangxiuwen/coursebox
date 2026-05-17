@@ -15,7 +15,7 @@ android {
         targetSdk = 34
         // Stable semver name — must match GitHub release tags (vX.Y.Z) so the
         // in-app update checker can compare. Bump on every release.
-        versionName = "0.10.1"
+        versionName = "0.10.2"
         // Monotonic versionCode from epoch-2024 so reinstall always advances
         // even between semver bumps.
         versionCode = ((System.currentTimeMillis() - 1704067200_000L) / 1000)
@@ -26,6 +26,18 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            // Pin storeFile so CI (and any other machine) signs with the same
+            // keystore restored from secrets, instead of AGP auto-generating
+            // a per-runner one. File is never in the repo.
+            storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
