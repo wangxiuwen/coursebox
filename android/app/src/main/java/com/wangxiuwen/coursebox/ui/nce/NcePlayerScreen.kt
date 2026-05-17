@@ -392,7 +392,7 @@ private fun ColumnScope.PlayerBackLyrics(vm: NcePlayerVm, lesson: NceLesson) {
 }
 
 @Composable
-private fun LyricsTab(label: String, selected: Boolean, onClick: () -> Unit) {
+internal fun LyricsTab(label: String, selected: Boolean, onClick: () -> Unit) {
     Column(
         modifier = Modifier.clickable(
             interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
@@ -419,7 +419,7 @@ private fun LyricsTab(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun LyricsLinesContent(vm: NcePlayerVm, lesson: NceLesson) {
+internal fun LyricsLinesContent(vm: NcePlayerVm, lesson: NceLesson) {
     val lines = lesson.lines
     if (lines.isEmpty()) {
         Text("课文文本缺失", color = OnDarkFaint, style = MaterialTheme.typography.bodyMedium)
@@ -464,7 +464,7 @@ private fun LyricsLinesContent(vm: NcePlayerVm, lesson: NceLesson) {
 }
 
 @Composable
-private fun LyricsWordsContent(lesson: NceLesson) {
+internal fun LyricsWordsContent(lesson: NceLesson) {
     var rendered = false
     for (s in lesson.sections) {
         if (s.words.isEmpty()) continue
@@ -501,7 +501,7 @@ private fun LyricsWordsContent(lesson: NceLesson) {
 }
 
 @Composable
-private fun LyricsQuestionContent(lesson: NceLesson) {
+internal fun LyricsQuestionContent(lesson: NceLesson) {
     if (lesson.question.isBlank()) {
         Text("本课暂无问题", color = OnDarkFaint, style = MaterialTheme.typography.bodyMedium)
         return

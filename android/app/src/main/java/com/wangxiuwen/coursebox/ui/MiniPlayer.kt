@@ -11,6 +11,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -150,7 +152,8 @@ fun MiniPlayer(
                     }
                 } else {
                     LyricsOverlay(
-                        lines = lesson.lines,
+                        vm = vm,
+                        lesson = lesson,
                         positionMs = vm.positionMs,
                         durationMs = vm.durationMs,
                     )
@@ -349,10 +352,18 @@ fun MiniPlayer(
  */
 @Composable
 private fun LyricsOverlay(
-    lines: List<com.wangxiuwen.coursebox.ui.nce.NceLine>,
+    vm: com.wangxiuwen.coursebox.ui.nce.NcePlayerVm,
+    lesson: com.wangxiuwen.coursebox.ui.nce.NceLesson,
     positionMs: Long,
     durationMs: Long,
 ) {
+    val lines = lesson.lines
+    val hasWords = lesson.sections.any { it.words.isNotEmpty() }
+    val hasQuestion = lesson.question.isNotBlank()
+
+    // Tab selection — reset to "lines" when lesson changes.
+    var selectedTab by remember(lesson.id) { mutableStateOf("lines") }
+
     val curIdx = remember(lines, positionMs, durationMs) {
         if (lines.isEmpty()) -1
         else if (lines.any { it.startMs >= 0 }) {
@@ -374,65 +385,129 @@ private fun LyricsOverlay(
             .clip(RoundedCornerShape(14.dp))
             .background(Color.Black.copy(alpha = 0.78f)),
     ) {
-        if (curIdx < 0) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Tab row across the top — same widget as the full player.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(20.dp),
             ) {
-                Text(
-                    "♪ 暂无课文",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White.copy(alpha = 0.6f),
-                )
+                com.wangxiuwen.coursebox.ui.nce.LyricsTab(
+                    "课文",
+                    selected = selectedTab == "lines",
+                ) { selectedTab = "lines" }
+                if (hasWords) {
+                    com.wangxiuwen.coursebox.ui.nce.LyricsTab(
+                        "单词",
+                        selected = selectedTab == "words",
+                    ) { selectedTab = "words" }
+                }
+                if (hasQuestion) {
+                    com.wangxiuwen.coursebox.ui.nce.LyricsTab(
+                        "问题",
+                        selected = selectedTab == "question",
+                    ) { selectedTab = "question" }
+                }
             }
-            return@BoxWithConstraints
-        }
 
-        val listState = rememberLazyListState()
-        // Pause auto-scroll while the user is dragging so we don't fight
-        // them. Resume on the next line change (no explicit "snap back"
-        // button — simpler UX, matches spec).
-        val userScrolling by remember {
-            derivedStateOf { listState.isScrollInProgress }
-        }
-        LaunchedEffect(curIdx, lines.size) {
-            if (!userScrolling && curIdx in lines.indices) {
-                // Negative offset shifts the item *up* by 200px from the
-                // viewport top, so the active line lands in the upper
-                // third rather than glued to the top edge.
-                listState.animateScrollToItem(curIdx, scrollOffset = -200)
-            }
-        }
-
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(lines.size) { i ->
-                val line = lines[i]
-                val text = line.en.ifBlank { line.cn }
-                if (text.isBlank()) return@items
-                val isCur = i == curIdx
-                Column {
-                    Text(
-                        text = text,
-                        fontSize = 17.sp,
-                        lineHeight = 22.sp,
-                        fontWeight = if (isCur) FontWeight.Bold else FontWeight.Normal,
-                        color = if (isCur) Color.White else Color.White.copy(alpha = 0.6f),
-                    )
-                    if (line.en.isNotBlank() && line.cn.isNotBlank()) {
-                        Text(
-                            text = line.cn,
-                            fontSize = 13.sp,
-                            lineHeight = 18.sp,
-                            color = if (isCur) Color.White.copy(alpha = 0.85f)
-                            else Color.White.copy(alpha = 0.45f),
-                        )
+            // Content area fills the remaining space.
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when (selectedTab) {
+                    "words" -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            com.wangxiuwen.coursebox.ui.nce.LyricsWordsContent(lesson)
+                        }
                     }
+                    "question" -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            com.wangxiuwen.coursebox.ui.nce.LyricsQuestionContent(lesson)
+                        }
+                    }
+                    else -> LinesTabContent(lines = lines, curIdx = curIdx)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 课文 tab content — preserves the original LazyColumn + auto-scroll
+ * behaviour from the audio-overlay inline view.
+ */
+@Composable
+private fun LinesTabContent(
+    lines: List<com.wangxiuwen.coursebox.ui.nce.NceLine>,
+    curIdx: Int,
+) {
+    if (curIdx < 0 || lines.isEmpty()) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "♪ 暂无课文",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White.copy(alpha = 0.6f),
+            )
+        }
+        return
+    }
+
+    val listState = rememberLazyListState()
+    // Pause auto-scroll while the user is dragging so we don't fight
+    // them. Resume on the next line change (no explicit "snap back"
+    // button — simpler UX, matches spec).
+    val userScrolling by remember {
+        derivedStateOf { listState.isScrollInProgress }
+    }
+    LaunchedEffect(curIdx, lines.size) {
+        if (!userScrolling && curIdx in lines.indices) {
+            // Negative offset shifts the item *up* by 200px from the
+            // viewport top, so the active line lands in the upper
+            // third rather than glued to the top edge.
+            listState.animateScrollToItem(curIdx, scrollOffset = -200)
+        }
+    }
+
+    LazyColumn(
+        state = listState,
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(lines.size) { i ->
+            val line = lines[i]
+            val text = line.en.ifBlank { line.cn }
+            if (text.isBlank()) return@items
+            val isCur = i == curIdx
+            Column {
+                Text(
+                    text = text,
+                    fontSize = 17.sp,
+                    lineHeight = 22.sp,
+                    fontWeight = if (isCur) FontWeight.Bold else FontWeight.Normal,
+                    color = if (isCur) Color.White else Color.White.copy(alpha = 0.6f),
+                )
+                if (line.en.isNotBlank() && line.cn.isNotBlank()) {
+                    Text(
+                        text = line.cn,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        color = if (isCur) Color.White.copy(alpha = 0.85f)
+                        else Color.White.copy(alpha = 0.45f),
+                    )
                 }
             }
         }
