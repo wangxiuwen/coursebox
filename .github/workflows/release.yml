@@ -27,6 +27,10 @@ jobs:
             ~/.gradle/wrapper
           key: ${{ runner.os }}-gradle-android-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
           restore-keys: ${{ runner.os }}-gradle-android-
+      - name: Restore signing keystore
+        run: |
+          mkdir -p ~/.android
+          echo "${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}" | base64 -d > ~/.android/debug.keystore
       - name: Build APK
         working-directory: android
         run: ./gradlew :app:assembleRelease
