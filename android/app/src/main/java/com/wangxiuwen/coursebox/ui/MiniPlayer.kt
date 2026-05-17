@@ -102,6 +102,26 @@ fun MiniPlayer(
         val duration = vm.durationMs.coerceAtLeast(1L)
         val progress = (vm.positionMs.toFloat() / duration).coerceIn(0f, 1f)
 
+        // Screen dimensions used to clamp the drag offset so the capsule
+        // can't be dragged past the bottom comfort zone (~80dp from the
+        // device's bottom edge) or off-screen sideways.
+        val cfg = androidx.compose.ui.platform.LocalConfiguration.current
+        val screenWidthDp = cfg.screenWidthDp.toFloat()
+        val screenHeightDp = cfg.screenHeightDp.toFloat()
+        // Capsule width = screenWidth - 24dp (12dp horizontal padding on
+        // each side). Half of that is how far the centre can shift before
+        // an edge clips; leave 12dp breathing margin.
+        val maxDragXDp = (screenWidthDp - 24f) / 2f - 12f
+        // Y axis grows downward. The capsule rests at BottomCenter with a
+        // 26dp gap to the bottom (RootScreen padding). Cap positive dy at
+        // +20dp so a small dip is still allowed but the bar can't be
+        // dragged past the device's bottom edge or into the gesture bar.
+        val maxDragYDp = 20f
+        // Negative dy pulls it up. Allow it to be parked near the top of
+        // the screen, leaving ~200dp of safe area for status bar + app
+        // chrome above.
+        val minDragYDp = -(screenHeightDp - 200f).coerceAtLeast(0f)
+
         Column(
             modifier = Modifier
                 .offset(vm.miniDragX.dp, vm.miniDragY.dp)
@@ -171,13 +191,20 @@ fun MiniPlayer(
                 )
                 .clip(RoundedCornerShape(28.dp))
                 .background(Color.White)
-                .pointerInput(Unit) {
+                .pointerInput(maxDragXDp, maxDragYDp, minDragYDp) {
                     detectDragGestures { change, drag ->
                         change.consume()
                         val dx = with(density) { drag.x.toDp().value }
                         val dy = with(density) { drag.y.toDp().value }
-                        vm.miniDragX += dx
-                        vm.miniDragY += dy
+                        // Clamp so the capsule can't be flung off-screen
+                        // sideways or dragged below the bottom comfort
+                        // zone. Bottom limit (+20dp) is intentionally
+                        // tight — user feedback was that pulling it too
+                        // low makes it awkward to recover.
+                        vm.miniDragX = (vm.miniDragX + dx)
+                            .coerceIn(-maxDragXDp, maxDragXDp)
+                        vm.miniDragY = (vm.miniDragY + dy)
+                            .coerceIn(minDragYDp, maxDragYDp)
                     }
                 }
                 .combinedClickable(
@@ -192,20 +219,10 @@ fun MiniPlayer(
                     onLongClick = { showSheet = true },
                 ),
         ) {
-            // Progress hairline along the top edge.
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.dp)
-                    .background(Color(0x14000000)),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(progress)
-                        .height(2.dp)
-                        .background(tone.gradMid),
-                )
-            }
+            // Progress is rendered as a thin ring around the play/pause
+            // button on the right of the capsule (see below). The top
+            // hairline was removed — it read like a stray top border and
+            // clashed with the 28dp rounded capsule shape.
 
             Row(
                 modifier = Modifier.fillMaxSize().padding(start = 8.dp, end = 12.dp),
@@ -264,24 +281,51 @@ fun MiniPlayer(
                         strokeWidth = 2.dp,
                     )
                 } else {
+                    // Play / pause button with a thin circular progress
+                    // ring tracing the outer edge. The ring replaces the
+                    // old top-edge hairline so the capsule no longer looks
+                    // like it has a stray top border.
                     Box(
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(tone.gradMid)
-                            .combinedClickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = { vm.togglePlayPause() },
-                            ),
+                        modifier = Modifier.size(40.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(
-                            if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (vm.isPlaying) "暂停" else "播放",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp),
+                        // Track (full circle, faint).
+                        CircularProgressIndicator(
+                            progress = { 1f },
+                            modifier = Modifier.fillMaxSize(),
+                            color = Color(0x14000000),
+                            strokeWidth = 2.dp,
+                            trackColor = Color.Transparent,
+                            strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
                         )
+                        // Active arc.
+                        CircularProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier.fillMaxSize(),
+                            color = tone.gradMid,
+                            strokeWidth = 2.dp,
+                            trackColor = Color.Transparent,
+                            strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(tone.gradMid)
+                                .combinedClickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = { vm.togglePlayPause() },
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (vm.isPlaying) "暂停" else "播放",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.width(6.dp))
