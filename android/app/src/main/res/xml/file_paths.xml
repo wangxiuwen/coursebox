@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- coursebox_library is where CourseLibrary materializes objects/ -->
+    <files-path name="coursebox_library" path="coursebox_library/" />
+    <cache-path name="cache" path="." />
+</paths>

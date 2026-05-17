@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-android-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-android-
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew :app:assembleRelease
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/release/app-release.apk \
+             out/coursebox-android-${{ github.ref_name }}.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: out/*.apk
+
+  packager-macos:
+    name: Build Packager (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build DMG
+        working-directory: packager
+        run: ./gradlew :app:packageDmg
+      - name: Collect artifact
+        run: |
+          mkdir -p out
+          cp packager/app/build/compose/binaries/main/dmg/*.dmg \
+             out/coursebox-packager-macos-${{ runner.arch }}.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packager-macos
+          path: out/*.dmg
+
+  packager-windows:
+    name: Build Packager (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build MSI
+        working-directory: packager
+        run: ./gradlew :app:packageMsi
+      - name: Collect artifact
+        run: |
+          mkdir out
+          copy packager\app\build\compose\binaries\main\msi\*.msi out\coursebox-packager-windows-x64.msi
+        shell: cmd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packager-windows
+          path: out/*.msi
+
+  packager-linux:
+    name: Build Packager (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build DEB
+        working-directory: packager
+        run: ./gradlew :app:packageDeb
+      - name: Collect artifact
+        run: |
+          mkdir -p out
+          cp packager/app/build/compose/binaries/main/deb/*.deb \
+             out/coursebox-packager-linux-x64.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packager-linux
+          path: out/*.deb
+
+  release:
+    name: Publish GitHub Release
+    needs: [android, packager-macos, packager-windows, packager-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: List artifacts
+        run: ls -R dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true
+          fail_on_unmatched_files: false

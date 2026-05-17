@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Pure-Compose app: the Material3 colour scheme is driven by ParrotTheme
+        in Kotlin, so the Activity theme just needs to be a Light/NoActionBar
+        platform theme — no need to pull in com.google.android.material.
+    -->
+    <style name="Theme.Parrot" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

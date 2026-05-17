@@ -1,0 +1,41 @@
+# Gradle
+.gradle/
+build/
+!gradle-wrapper.jar
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.fleet/
+
+# Output artifacts
+*.apk
+*.aab
+*.dmg
+*.exe
+*.msi
+*.deb
+*.rpm
+*.pkg
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Java
+*.class
+
+# Kotlin
+hs_err_pid*
+
+# Coursebox runtime data — never commit course content
+coursebox_library/
+parrot_library/
+*.coursebox.zip
+*.keystore
+*.jks
