@@ -127,6 +127,17 @@ class LanImportServer(
                 .btn:disabled { opacity: .45; cursor: default; }
                 .btn.ghost { background: #fff; color: #007AFF; border: 1px solid #007AFF; }
                 .status { margin-top: 12px; font-size: 13px; color: #444; min-height: 18px; }
+                .progress {
+                  margin-top: 10px; height: 6px; width: 100%;
+                  background: #ECEBE7; border-radius: 3px; overflow: hidden;
+                  display: none;
+                }
+                .progress.on { display: block; }
+                .progress > .bar {
+                  height: 100%; width: 0%;
+                  background: #007AFF; border-radius: 3px;
+                  transition: width .15s linear;
+                }
                 #file { position: absolute; left: -9999px; opacity: 0; }
                 .ver { color: #9CA3AF; font-size: 12px; margin-top: 8px; }
               </style>
@@ -140,6 +151,7 @@ class LanImportServer(
                   <span id="dropText">点击选择或拖拽 zip 文件</span>
                 </label>
                 <button class="btn" id="go" disabled>上传</button>
+                <div class="progress" id="progress"><div class="bar" id="bar"></div></div>
                 <div class="status" id="status"></div>
               </div>
 
@@ -179,23 +191,49 @@ class LanImportServer(
                     if (e.dataTransfer && e.dataTransfer.files.length) pick(e.dataTransfer.files[0]);
                   });
 
+                  var progress = document.getElementById('progress');
+                  var bar = document.getElementById('bar');
+                  function fmtMB(b) { return (b / 1024 / 1024).toFixed(1) + ' MB'; }
+
                   go.addEventListener('click', function() {
                     if (!selected) return;
-                    go.disabled = true; status.textContent = '上传中…';
-                    var fd = new FormData();
-                    fd.append('file', selected, selected.name);
-                    fetch('/upload', { method: 'POST', body: fd })
-                      .then(function(r) { return r.text().then(function(t) { return { ok: r.ok, t: t }; }); })
-                      .then(function(x) {
-                        status.textContent = x.ok ? ('✓ ' + x.t) : ('上传失败：' + x.t);
-                        if (x.ok) {
-                          selected = null;
-                          dropText.textContent = '点击选择或拖拽 zip 文件';
-                        } else {
-                          go.disabled = false;
-                        }
-                      })
-                      .catch(function(e) { status.textContent = '上传失败：' + e.message; go.disabled = false; });
+                    go.disabled = true;
+                    progress.classList.add('on');
+                    bar.style.width = '0%';
+                    status.textContent = '上传中… 0%';
+                    var xhr = new XMLHttpRequest();
+                    var startedAt = Date.now();
+                    xhr.upload.addEventListener('progress', function(e) {
+                      if (!e.lengthComputable) return;
+                      var pct = (e.loaded / e.total) * 100;
+                      bar.style.width = pct.toFixed(1) + '%';
+                      var elapsed = (Date.now() - startedAt) / 1000;
+                      var speed = elapsed > 0.5 ? ' · ' + fmtMB(e.loaded / elapsed) + '/s' : '';
+                      status.textContent = '上传中… ' + pct.toFixed(0) + '% (' +
+                        fmtMB(e.loaded) + ' / ' + fmtMB(e.total) + ')' + speed;
+                    });
+                    xhr.upload.addEventListener('load', function() {
+                      bar.style.width = '100%';
+                      status.textContent = '上传完成，正在导入到课程库…';
+                    });
+                    xhr.onerror = function() {
+                      status.textContent = '上传失败：网络错误';
+                      go.disabled = false;
+                    };
+                    xhr.onload = function() {
+                      if (xhr.status >= 200 && xhr.status < 300) {
+                        status.textContent = '✓ ' + xhr.responseText;
+                        selected = null;
+                        dropText.textContent = '点击选择或拖拽 zip 文件';
+                        setTimeout(function() { progress.classList.remove('on'); }, 800);
+                      } else {
+                        status.textContent = '导入失败：' + (xhr.responseText || ('HTTP ' + xhr.status));
+                        go.disabled = false;
+                      }
+                    };
+                    xhr.open('PUT', '/raw?name=' + encodeURIComponent(selected.name));
+                    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+                    xhr.send(selected);
                   });
                 })();
               </script>
@@ -213,8 +251,8 @@ class LanImportServer(
                 Response.Status.BAD_REQUEST, "text/plain", "missing file part",
             )
             val originalName = session.parameters["file"]?.firstOrNull() ?: "import.zip"
-            ingest(File(tmpPath), originalName)
-            newFixedLengthResponse(Response.Status.OK, "text/plain", "已接收，正在导入…")
+            val msg = ingestSync(File(tmpPath), originalName)
+            newFixedLengthResponse(Response.Status.OK, "text/plain", msg)
         } catch (e: Throwable) {
             Log.w(TAG, "multipart fail", e)
             newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", e.message ?: "error")
@@ -223,26 +261,42 @@ class LanImportServer(
 
     private fun handleRaw(session: IHTTPSession): Response {
         return try {
+            val name = session.parameters["name"]?.firstOrNull()
+                ?: "lan-import-${System.currentTimeMillis()}.zip"
             val out = File(ctx.cacheDir, "lan-import-${System.currentTimeMillis()}.zip")
             session.inputStream.use { input ->
                 out.outputStream().use { input.copyTo(it) }
             }
-            ingest(out, out.name)
-            newFixedLengthResponse(Response.Status.OK, "text/plain", "ok")
+            val msg = ingestSync(out, name)
+            newFixedLengthResponse(Response.Status.OK, "text/plain", msg)
         } catch (e: Throwable) {
+            Log.w(TAG, "raw fail", e)
             newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", e.message ?: "error")
         }
     }
 
-    private fun ingest(src: File, label: String) {
+    /**
+     * Run library import on the calling thread and return a user-facing
+     * status string. The browser blocks on the PUT response, so we must
+     * actually finish (not fire-and-forget) before replying — otherwise
+     * the page reports "uploaded" with no idea whether the package is
+     * really in the library. Errors are propagated as 500.
+     */
+    private fun ingestSync(src: File, label: String): String {
         onProgress("收到 $label，正在导入…")
-        scope.launch {
-            runCatching { library.importLocalFile(src, sourceLabel = "lan://$label") }
-                .onSuccess { res ->
-                    val titles = res.packages.joinToString { it.title }
-                    onProgress("✓ 已导入：$titles（${res.addedObjects} 个对象）")
-                }
-                .onFailure { onProgress("导入失败：${it.message}") }
+        return try {
+            val res = kotlinx.coroutines.runBlocking {
+                library.importLocalFile(src, sourceLabel = "lan://$label")
+            }
+            val titles = res.packages.joinToString { it.title }
+            val msg = "已导入：$titles（${res.addedObjects} 个对象）"
+            onProgress("✓ $msg")
+            msg
+        } catch (e: Throwable) {
+            Log.w(TAG, "ingest fail", e)
+            onProgress("导入失败：${e.message}")
+            throw e
+        } finally {
             runCatching { src.delete() }
         }
     }
