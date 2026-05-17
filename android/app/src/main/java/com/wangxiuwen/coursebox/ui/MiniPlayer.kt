@@ -11,6 +11,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -102,6 +104,26 @@ fun MiniPlayer(
         val duration = vm.durationMs.coerceAtLeast(1L)
         val progress = (vm.positionMs.toFloat() / duration).coerceIn(0f, 1f)
 
+        // Screen dimensions used to clamp the drag offset so the capsule
+        // can't be dragged past the bottom comfort zone (~80dp from the
+        // device's bottom edge) or off-screen sideways.
+        val cfg = androidx.compose.ui.platform.LocalConfiguration.current
+        val screenWidthDp = cfg.screenWidthDp.toFloat()
+        val screenHeightDp = cfg.screenHeightDp.toFloat()
+        // Capsule width = screenWidth - 24dp (12dp horizontal padding on
+        // each side). Half of that is how far the centre can shift before
+        // an edge clips; leave 12dp breathing margin.
+        val maxDragXDp = (screenWidthDp - 24f) / 2f - 12f
+        // Y axis grows downward. The capsule rests at BottomCenter with a
+        // 26dp gap to the bottom (RootScreen padding). Cap positive dy at
+        // +20dp so a small dip is still allowed but the bar can't be
+        // dragged past the device's bottom edge or into the gesture bar.
+        val maxDragYDp = 20f
+        // Negative dy pulls it up. Allow it to be parked near the top of
+        // the screen, leaving ~200dp of safe area for status bar + app
+        // chrome above.
+        val minDragYDp = -(screenHeightDp - 200f).coerceAtLeast(0f)
+
         Column(
             modifier = Modifier
                 .offset(vm.miniDragX.dp, vm.miniDragY.dp)
@@ -150,7 +172,8 @@ fun MiniPlayer(
                     }
                 } else {
                     LyricsOverlay(
-                        lines = lesson.lines,
+                        vm = vm,
+                        lesson = lesson,
                         positionMs = vm.positionMs,
                         durationMs = vm.durationMs,
                     )
@@ -171,13 +194,20 @@ fun MiniPlayer(
                 )
                 .clip(RoundedCornerShape(28.dp))
                 .background(Color.White)
-                .pointerInput(Unit) {
+                .pointerInput(maxDragXDp, maxDragYDp, minDragYDp) {
                     detectDragGestures { change, drag ->
                         change.consume()
                         val dx = with(density) { drag.x.toDp().value }
                         val dy = with(density) { drag.y.toDp().value }
-                        vm.miniDragX += dx
-                        vm.miniDragY += dy
+                        // Clamp so the capsule can't be flung off-screen
+                        // sideways or dragged below the bottom comfort
+                        // zone. Bottom limit (+20dp) is intentionally
+                        // tight — user feedback was that pulling it too
+                        // low makes it awkward to recover.
+                        vm.miniDragX = (vm.miniDragX + dx)
+                            .coerceIn(-maxDragXDp, maxDragXDp)
+                        vm.miniDragY = (vm.miniDragY + dy)
+                            .coerceIn(minDragYDp, maxDragYDp)
                     }
                 }
                 .combinedClickable(
@@ -192,20 +222,10 @@ fun MiniPlayer(
                     onLongClick = { showSheet = true },
                 ),
         ) {
-            // Progress hairline along the top edge.
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.dp)
-                    .background(Color(0x14000000)),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(progress)
-                        .height(2.dp)
-                        .background(tone.gradMid),
-                )
-            }
+            // Progress is rendered as a thin ring around the play/pause
+            // button on the right of the capsule (see below). The top
+            // hairline was removed — it read like a stray top border and
+            // clashed with the 28dp rounded capsule shape.
 
             Row(
                 modifier = Modifier.fillMaxSize().padding(start = 8.dp, end = 12.dp),
@@ -264,24 +284,51 @@ fun MiniPlayer(
                         strokeWidth = 2.dp,
                     )
                 } else {
+                    // Play / pause button with a thin circular progress
+                    // ring tracing the outer edge. The ring replaces the
+                    // old top-edge hairline so the capsule no longer looks
+                    // like it has a stray top border.
                     Box(
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clip(CircleShape)
-                            .background(tone.gradMid)
-                            .combinedClickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = { vm.togglePlayPause() },
-                            ),
+                        modifier = Modifier.size(40.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(
-                            if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (vm.isPlaying) "暂停" else "播放",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp),
+                        // Track (full circle, faint).
+                        CircularProgressIndicator(
+                            progress = { 1f },
+                            modifier = Modifier.fillMaxSize(),
+                            color = Color(0x14000000),
+                            strokeWidth = 2.dp,
+                            trackColor = Color.Transparent,
+                            strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
                         )
+                        // Active arc.
+                        CircularProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier.fillMaxSize(),
+                            color = tone.gradMid,
+                            strokeWidth = 2.dp,
+                            trackColor = Color.Transparent,
+                            strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(tone.gradMid)
+                                .combinedClickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = { vm.togglePlayPause() },
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (vm.isPlaying) "暂停" else "播放",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.width(6.dp))
@@ -349,10 +396,18 @@ fun MiniPlayer(
  */
 @Composable
 private fun LyricsOverlay(
-    lines: List<com.wangxiuwen.coursebox.ui.nce.NceLine>,
+    vm: com.wangxiuwen.coursebox.ui.nce.NcePlayerVm,
+    lesson: com.wangxiuwen.coursebox.ui.nce.NceLesson,
     positionMs: Long,
     durationMs: Long,
 ) {
+    val lines = lesson.lines
+    val hasWords = lesson.sections.any { it.words.isNotEmpty() }
+    val hasQuestion = lesson.question.isNotBlank()
+
+    // Tab selection — reset to "lines" when lesson changes.
+    var selectedTab by remember(lesson.id) { mutableStateOf("lines") }
+
     val curIdx = remember(lines, positionMs, durationMs) {
         if (lines.isEmpty()) -1
         else if (lines.any { it.startMs >= 0 }) {
@@ -374,65 +429,129 @@ private fun LyricsOverlay(
             .clip(RoundedCornerShape(14.dp))
             .background(Color.Black.copy(alpha = 0.78f)),
     ) {
-        if (curIdx < 0) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Tab row across the top — same widget as the full player.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(20.dp),
             ) {
-                Text(
-                    "♪ 暂无课文",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White.copy(alpha = 0.6f),
-                )
+                com.wangxiuwen.coursebox.ui.nce.LyricsTab(
+                    "课文",
+                    selected = selectedTab == "lines",
+                ) { selectedTab = "lines" }
+                if (hasWords) {
+                    com.wangxiuwen.coursebox.ui.nce.LyricsTab(
+                        "单词",
+                        selected = selectedTab == "words",
+                    ) { selectedTab = "words" }
+                }
+                if (hasQuestion) {
+                    com.wangxiuwen.coursebox.ui.nce.LyricsTab(
+                        "问题",
+                        selected = selectedTab == "question",
+                    ) { selectedTab = "question" }
+                }
             }
-            return@BoxWithConstraints
-        }
 
-        val listState = rememberLazyListState()
-        // Pause auto-scroll while the user is dragging so we don't fight
-        // them. Resume on the next line change (no explicit "snap back"
-        // button — simpler UX, matches spec).
-        val userScrolling by remember {
-            derivedStateOf { listState.isScrollInProgress }
-        }
-        LaunchedEffect(curIdx, lines.size) {
-            if (!userScrolling && curIdx in lines.indices) {
-                // Negative offset shifts the item *up* by 200px from the
-                // viewport top, so the active line lands in the upper
-                // third rather than glued to the top edge.
-                listState.animateScrollToItem(curIdx, scrollOffset = -200)
-            }
-        }
-
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(lines.size) { i ->
-                val line = lines[i]
-                val text = line.en.ifBlank { line.cn }
-                if (text.isBlank()) return@items
-                val isCur = i == curIdx
-                Column {
-                    Text(
-                        text = text,
-                        fontSize = 17.sp,
-                        lineHeight = 22.sp,
-                        fontWeight = if (isCur) FontWeight.Bold else FontWeight.Normal,
-                        color = if (isCur) Color.White else Color.White.copy(alpha = 0.6f),
-                    )
-                    if (line.en.isNotBlank() && line.cn.isNotBlank()) {
-                        Text(
-                            text = line.cn,
-                            fontSize = 13.sp,
-                            lineHeight = 18.sp,
-                            color = if (isCur) Color.White.copy(alpha = 0.85f)
-                            else Color.White.copy(alpha = 0.45f),
-                        )
+            // Content area fills the remaining space.
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when (selectedTab) {
+                    "words" -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            com.wangxiuwen.coursebox.ui.nce.LyricsWordsContent(lesson)
+                        }
                     }
+                    "question" -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            com.wangxiuwen.coursebox.ui.nce.LyricsQuestionContent(lesson)
+                        }
+                    }
+                    else -> LinesTabContent(lines = lines, curIdx = curIdx)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 课文 tab content — preserves the original LazyColumn + auto-scroll
+ * behaviour from the audio-overlay inline view.
+ */
+@Composable
+private fun LinesTabContent(
+    lines: List<com.wangxiuwen.coursebox.ui.nce.NceLine>,
+    curIdx: Int,
+) {
+    if (curIdx < 0 || lines.isEmpty()) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "♪ 暂无课文",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White.copy(alpha = 0.6f),
+            )
+        }
+        return
+    }
+
+    val listState = rememberLazyListState()
+    // Pause auto-scroll while the user is dragging so we don't fight
+    // them. Resume on the next line change (no explicit "snap back"
+    // button — simpler UX, matches spec).
+    val userScrolling by remember {
+        derivedStateOf { listState.isScrollInProgress }
+    }
+    LaunchedEffect(curIdx, lines.size) {
+        if (!userScrolling && curIdx in lines.indices) {
+            // Negative offset shifts the item *up* by 200px from the
+            // viewport top, so the active line lands in the upper
+            // third rather than glued to the top edge.
+            listState.animateScrollToItem(curIdx, scrollOffset = -200)
+        }
+    }
+
+    LazyColumn(
+        state = listState,
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(lines.size) { i ->
+            val line = lines[i]
+            val text = line.en.ifBlank { line.cn }
+            if (text.isBlank()) return@items
+            val isCur = i == curIdx
+            Column {
+                Text(
+                    text = text,
+                    fontSize = 17.sp,
+                    lineHeight = 22.sp,
+                    fontWeight = if (isCur) FontWeight.Bold else FontWeight.Normal,
+                    color = if (isCur) Color.White else Color.White.copy(alpha = 0.6f),
+                )
+                if (line.en.isNotBlank() && line.cn.isNotBlank()) {
+                    Text(
+                        text = line.cn,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        color = if (isCur) Color.White.copy(alpha = 0.85f)
+                        else Color.White.copy(alpha = 0.45f),
+                    )
                 }
             }
         }
