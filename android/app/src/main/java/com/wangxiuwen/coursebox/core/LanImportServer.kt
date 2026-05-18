@@ -40,6 +40,18 @@ class LanImportServer(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
+     * Asynchronous import state, keyed by sessionId. Browser polls
+     * `GET /status?id=...` while we run the long-running import in the
+     * background. Kept in memory only — server restarts mean any pending
+     * imports were already started in the previous process.
+     */
+    private data class ImportState(
+        val status: String,   // "pending" | "done" | "error"
+        val message: String,  // human-readable progress / result / error
+    )
+    private val imports = java.util.concurrent.ConcurrentHashMap<String, ImportState>()
+
+    /**
      * LocalSend v2 receiver, runs on port 53317 in parallel. We lifecycle it
      * alongside this server so a desktop running LocalSend can push a zip
      * directly without the browser upload page.
@@ -56,8 +68,32 @@ class LanImportServer(
         session.method == Method.GET && session.uri == "/" -> page()
         session.method == Method.POST && session.uri == "/upload" -> handleMultipart(session)
         session.method == Method.PUT && session.uri.startsWith("/raw") -> handleRaw(session)
+        session.method == Method.GET && session.uri == "/status" -> handleStatus(session)
         session.method == Method.GET && session.uri == "/apk" -> serveApk()
         else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
+    }
+
+    private fun handleStatus(session: IHTTPSession): Response {
+        val id = session.parameters["id"]?.firstOrNull().orEmpty()
+        val st = imports[id]
+            ?: return newFixedLengthResponse(
+                Response.Status.NOT_FOUND, "application/json",
+                """{"status":"unknown","message":"未知任务"}""",
+            )
+        val body = """{"status":"${st.status}","message":${jsonStr(st.message)}}"""
+        return newFixedLengthResponse(Response.Status.OK, "application/json", body)
+    }
+
+    private fun jsonStr(s: String): String = buildString {
+        append('"')
+        for (c in s) when (c) {
+            '\\', '"' -> { append('\\'); append(c) }
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (c.code < 0x20) append("\\u%04x".format(c.code)) else append(c)
+        }
+        append('"')
     }
 
     private fun serveApk(): Response {
@@ -214,22 +250,53 @@ class LanImportServer(
                     });
                     xhr.upload.addEventListener('load', function() {
                       bar.style.width = '100%';
-                      status.textContent = '上传完成，正在导入到课程库…';
+                      status.textContent = '上传完成，等待导入…';
                     });
                     xhr.onerror = function() {
                       status.textContent = '上传失败：网络错误';
                       go.disabled = false;
                     };
                     xhr.onload = function() {
-                      if (xhr.status >= 200 && xhr.status < 300) {
-                        status.textContent = '✓ ' + xhr.responseText;
-                        selected = null;
-                        dropText.textContent = '点击选择或拖拽 zip 文件';
-                        setTimeout(function() { progress.classList.remove('on'); }, 800);
-                      } else {
-                        status.textContent = '导入失败：' + (xhr.responseText || ('HTTP ' + xhr.status));
+                      if (xhr.status < 200 || xhr.status >= 300) {
+                        status.textContent = '上传失败：' + (xhr.responseText || ('HTTP ' + xhr.status));
                         go.disabled = false;
+                        return;
                       }
+                      var resp; try { resp = JSON.parse(xhr.responseText); } catch (_) { resp = {}; }
+                      if (!resp.id) {
+                        status.textContent = '上传完成，但未拿到任务 ID（' + xhr.responseText + '）';
+                        go.disabled = false;
+                        return;
+                      }
+                      var importStart = Date.now();
+                      function poll() {
+                        var px = new XMLHttpRequest();
+                        px.onerror = function() {
+                          // Transient: keep trying — the device might be busy
+                          // hashing a 3 GB file and a single poll can fail.
+                          setTimeout(poll, 2000);
+                        };
+                        px.onload = function() {
+                          var s; try { s = JSON.parse(px.responseText); } catch (_) { s = {}; }
+                          var elapsed = Math.round((Date.now() - importStart) / 1000);
+                          if (s.status === 'done') {
+                            status.textContent = '✓ ' + (s.message || '已导入');
+                            selected = null;
+                            dropText.textContent = '点击选择或拖拽 zip 文件';
+                            setTimeout(function() { progress.classList.remove('on'); }, 800);
+                          } else if (s.status === 'error') {
+                            status.textContent = '导入失败：' + (s.message || '未知错误');
+                            go.disabled = false;
+                          } else {
+                            status.textContent = '导入中… 已用 ' + elapsed + 's · ' +
+                              (s.message || '解析中');
+                            setTimeout(poll, 1500);
+                          }
+                        };
+                        px.open('GET', '/status?id=' + encodeURIComponent(resp.id));
+                        px.send();
+                      }
+                      poll();
                     };
                     xhr.open('PUT', '/raw?name=' + encodeURIComponent(selected.name));
                     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
@@ -251,8 +318,8 @@ class LanImportServer(
                 Response.Status.BAD_REQUEST, "text/plain", "missing file part",
             )
             val originalName = session.parameters["file"]?.firstOrNull() ?: "import.zip"
-            val msg = ingestSync(File(tmpPath), originalName)
-            newFixedLengthResponse(Response.Status.OK, "text/plain", msg)
+            val id = beginImport(File(tmpPath), originalName)
+            newFixedLengthResponse(Response.Status.OK, "application/json", """{"id":"$id"}""")
         } catch (e: Throwable) {
             Log.w(TAG, "multipart fail", e)
             newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", e.message ?: "error")
@@ -267,8 +334,8 @@ class LanImportServer(
             session.inputStream.use { input ->
                 out.outputStream().use { input.copyTo(it) }
             }
-            val msg = ingestSync(out, name)
-            newFixedLengthResponse(Response.Status.OK, "text/plain", msg)
+            val id = beginImport(out, name)
+            newFixedLengthResponse(Response.Status.OK, "application/json", """{"id":"$id"}""")
         } catch (e: Throwable) {
             Log.w(TAG, "raw fail", e)
             newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", e.message ?: "error")
@@ -276,29 +343,31 @@ class LanImportServer(
     }
 
     /**
-     * Run library import on the calling thread and return a user-facing
-     * status string. The browser blocks on the PUT response, so we must
-     * actually finish (not fire-and-forget) before replying — otherwise
-     * the page reports "uploaded" with no idea whether the package is
-     * really in the library. Errors are propagated as 500.
+     * Start an import in the background and return a session id. The HTTP
+     * response goes out immediately (so the browser doesn't time out while
+     * we're parsing a multi-GB zip); the page then polls GET /status?id=...
+     * to learn when the import finishes (or fails).
      */
-    private fun ingestSync(src: File, label: String): String {
+    private fun beginImport(src: File, label: String): String {
+        val id = java.util.UUID.randomUUID().toString().take(12)
+        imports[id] = ImportState("pending", "已接收 $label，正在导入到课程库…")
         onProgress("收到 $label，正在导入…")
-        return try {
-            val res = kotlinx.coroutines.runBlocking {
-                library.importLocalFile(src, sourceLabel = "lan://$label")
+        scope.launch {
+            try {
+                val res = library.importLocalFile(src, sourceLabel = "lan://$label")
+                val titles = res.packages.joinToString { it.title }
+                val msg = "已导入：$titles（${res.addedObjects} 个对象）"
+                imports[id] = ImportState("done", msg)
+                onProgress("✓ $msg")
+            } catch (e: Throwable) {
+                Log.w(TAG, "ingest fail", e)
+                imports[id] = ImportState("error", e.message ?: "未知错误")
+                onProgress("导入失败：${e.message}")
+            } finally {
+                runCatching { src.delete() }
             }
-            val titles = res.packages.joinToString { it.title }
-            val msg = "已导入：$titles（${res.addedObjects} 个对象）"
-            onProgress("✓ $msg")
-            msg
-        } catch (e: Throwable) {
-            Log.w(TAG, "ingest fail", e)
-            onProgress("导入失败：${e.message}")
-            throw e
-        } finally {
-            runCatching { src.delete() }
         }
+        return id
     }
 
     override fun stop() {
