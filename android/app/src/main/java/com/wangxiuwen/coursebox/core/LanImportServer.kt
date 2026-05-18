@@ -330,9 +330,29 @@ class LanImportServer(
         return try {
             val name = session.parameters["name"]?.firstOrNull()
                 ?: "lan-import-${System.currentTimeMillis()}.zip"
+            // NanoHTTPD's `inputStream` is the raw socket stream — it is NOT
+            // capped at Content-Length, so `copyTo` would read forever and
+            // hang the worker. We must read exactly Content-Length bytes.
+            val total = session.headers["content-length"]?.toLongOrNull()
+                ?: return newFixedLengthResponse(
+                    Response.Status.LENGTH_REQUIRED, "text/plain",
+                    "missing Content-Length",
+                )
             val out = File(ctx.cacheDir, "lan-import-${System.currentTimeMillis()}.zip")
-            session.inputStream.use { input ->
-                out.outputStream().use { input.copyTo(it) }
+            val buf = ByteArray(64 * 1024)
+            var remaining = total
+            val input = session.inputStream
+            out.outputStream().use { sink ->
+                while (remaining > 0) {
+                    val toRead = if (remaining < buf.size) remaining.toInt() else buf.size
+                    val n = input.read(buf, 0, toRead)
+                    if (n < 0) break
+                    sink.write(buf, 0, n)
+                    remaining -= n
+                }
+            }
+            if (remaining > 0) {
+                Log.w(TAG, "raw short read: $remaining bytes missing of $total")
             }
             val id = beginImport(out, name)
             newFixedLengthResponse(Response.Status.OK, "application/json", """{"id":"$id"}""")
