@@ -182,13 +182,14 @@ class LanImportServer(
               <div class="card">
                 <h1>📦 导入课程</h1>
                 <p class="sub">选一个 <code>.coursebox.zip</code> 上传到手机。</p>
-                <input id="file" type="file" accept=".zip,.coursebox.zip,application/zip">
+                <input id="file" type="file" multiple accept=".zip,.coursebox.zip,application/zip">
                 <label class="drop" id="drop" for="file">
-                  <span id="dropText">点击选择或拖拽 zip 文件</span>
+                  <span id="dropText">点击选择或拖拽 zip 文件（可多选）</span>
                 </label>
                 <button class="btn" id="go" disabled>上传</button>
                 <div class="progress" id="progress"><div class="bar" id="bar"></div></div>
                 <div class="status" id="status"></div>
+                <ul id="results" style="margin:10px 0 0;padding:0;list-style:none;font-size:13px;color:#444;"></ul>
               </div>
 
               <div class="card">
@@ -205,16 +206,20 @@ class LanImportServer(
                   var go = document.getElementById('go');
                   var status = document.getElementById('status');
                   var dropText = document.getElementById('dropText');
-                  var selected = null;
+                  var results = document.getElementById('results');
+                  var queue = [];
 
-                  function pick(f) {
-                    if (!f) return;
-                    selected = f;
-                    dropText.textContent = f.name + ' · ' + (f.size / 1024 / 1024).toFixed(1) + ' MB';
+                  function pickList(files) {
+                    if (!files || !files.length) return;
+                    queue = Array.prototype.slice.call(files);
+                    var totalMB = queue.reduce(function(a, f) { return a + f.size; }, 0) / 1024 / 1024;
+                    dropText.textContent = queue.length === 1
+                      ? queue[0].name + ' · ' + (queue[0].size / 1024 / 1024).toFixed(1) + ' MB'
+                      : queue.length + ' 个文件 · 共 ' + totalMB.toFixed(1) + ' MB';
                     go.disabled = false;
                   }
 
-                  fileEl.addEventListener('change', function(e) { pick(e.target.files[0]); });
+                  fileEl.addEventListener('change', function(e) { pickList(e.target.files); });
                   ['dragenter','dragover'].forEach(function(t) {
                     drop.addEventListener(t, function(e) { e.preventDefault(); drop.classList.add('hot'); });
                   });
@@ -224,19 +229,25 @@ class LanImportServer(
                   drop.addEventListener('drop', function(e) {
                     e.preventDefault();
                     drop.classList.remove('hot');
-                    if (e.dataTransfer && e.dataTransfer.files.length) pick(e.dataTransfer.files[0]);
+                    if (e.dataTransfer && e.dataTransfer.files.length) pickList(e.dataTransfer.files);
                   });
 
                   var progress = document.getElementById('progress');
                   var bar = document.getElementById('bar');
                   function fmtMB(b) { return (b / 1024 / 1024).toFixed(1) + ' MB'; }
+                  function addResult(text, ok) {
+                    var li = document.createElement('li');
+                    li.style.padding = '6px 0';
+                    li.style.borderTop = '1px solid #ECEBE7';
+                    li.style.color = ok ? '#0a7' : '#c33';
+                    li.textContent = (ok ? '✓ ' : '✗ ') + text;
+                    results.appendChild(li);
+                  }
 
-                  go.addEventListener('click', function() {
-                    if (!selected) return;
-                    go.disabled = true;
-                    progress.classList.add('on');
+                  function uploadOne(file, onDone) {
                     bar.style.width = '0%';
-                    status.textContent = '上传中… 0%';
+                    var label = file.name + ' · ' + fmtMB(file.size);
+                    status.textContent = label + ' · 上传中… 0%';
                     var xhr = new XMLHttpRequest();
                     var startedAt = Date.now();
                     xhr.upload.addEventListener('progress', function(e) {
@@ -245,50 +256,44 @@ class LanImportServer(
                       bar.style.width = pct.toFixed(1) + '%';
                       var elapsed = (Date.now() - startedAt) / 1000;
                       var speed = elapsed > 0.5 ? ' · ' + fmtMB(e.loaded / elapsed) + '/s' : '';
-                      status.textContent = '上传中… ' + pct.toFixed(0) + '% (' +
+                      status.textContent = label + ' · ' + pct.toFixed(0) + '% (' +
                         fmtMB(e.loaded) + ' / ' + fmtMB(e.total) + ')' + speed;
                     });
                     xhr.upload.addEventListener('load', function() {
                       bar.style.width = '100%';
-                      status.textContent = '上传完成，等待导入…';
+                      status.textContent = label + ' · 上传完成，等待导入…';
                     });
                     xhr.onerror = function() {
-                      status.textContent = '上传失败：网络错误';
-                      go.disabled = false;
+                      addResult(file.name + '：上传失败（网络错误）', false);
+                      onDone();
                     };
                     xhr.onload = function() {
                       if (xhr.status < 200 || xhr.status >= 300) {
-                        status.textContent = '上传失败：' + (xhr.responseText || ('HTTP ' + xhr.status));
-                        go.disabled = false;
+                        addResult(file.name + '：上传失败 ' + (xhr.responseText || ('HTTP ' + xhr.status)), false);
+                        onDone();
                         return;
                       }
                       var resp; try { resp = JSON.parse(xhr.responseText); } catch (_) { resp = {}; }
                       if (!resp.id) {
-                        status.textContent = '上传完成，但未拿到任务 ID（' + xhr.responseText + '）';
-                        go.disabled = false;
+                        addResult(file.name + '：未拿到任务 ID', false);
+                        onDone();
                         return;
                       }
                       var importStart = Date.now();
                       function poll() {
                         var px = new XMLHttpRequest();
-                        px.onerror = function() {
-                          // Transient: keep trying — the device might be busy
-                          // hashing a 3 GB file and a single poll can fail.
-                          setTimeout(poll, 2000);
-                        };
+                        px.onerror = function() { setTimeout(poll, 2000); };
                         px.onload = function() {
                           var s; try { s = JSON.parse(px.responseText); } catch (_) { s = {}; }
                           var elapsed = Math.round((Date.now() - importStart) / 1000);
                           if (s.status === 'done') {
-                            status.textContent = '✓ ' + (s.message || '已导入');
-                            selected = null;
-                            dropText.textContent = '点击选择或拖拽 zip 文件';
-                            setTimeout(function() { progress.classList.remove('on'); }, 800);
+                            addResult(file.name + '：' + (s.message || '已导入'), true);
+                            onDone();
                           } else if (s.status === 'error') {
-                            status.textContent = '导入失败：' + (s.message || '未知错误');
-                            go.disabled = false;
+                            addResult(file.name + '：' + (s.message || '导入失败'), false);
+                            onDone();
                           } else {
-                            status.textContent = '导入中… 已用 ' + elapsed + 's · ' +
+                            status.textContent = label + ' · 导入中… 已用 ' + elapsed + 's · ' +
                               (s.message || '解析中');
                             setTimeout(poll, 1500);
                           }
@@ -298,9 +303,31 @@ class LanImportServer(
                       }
                       poll();
                     };
-                    xhr.open('PUT', '/raw?name=' + encodeURIComponent(selected.name));
+                    xhr.open('PUT', '/raw?name=' + encodeURIComponent(file.name));
                     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-                    xhr.send(selected);
+                    xhr.send(file);
+                  }
+
+                  go.addEventListener('click', function() {
+                    if (!queue.length) return;
+                    go.disabled = true;
+                    progress.classList.add('on');
+                    var total = queue.length;
+                    var pending = queue.slice();
+                    function next() {
+                      if (!pending.length) {
+                        status.textContent = '全部完成（' + total + ' 个）';
+                        setTimeout(function() { progress.classList.remove('on'); }, 800);
+                        queue = [];
+                        dropText.textContent = '点击选择或拖拽 zip 文件（可多选）';
+                        return;
+                      }
+                      var f = pending.shift();
+                      var idx = total - pending.length;
+                      status.textContent = '[' + idx + '/' + total + '] ' + f.name + ' · 准备中…';
+                      uploadOne(f, next);
+                    }
+                    next();
                   });
                 })();
               </script>
