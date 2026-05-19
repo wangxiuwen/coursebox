@@ -3,6 +3,7 @@ package com.wangxiuwen.coursebox.ui.nce
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -89,7 +90,12 @@ fun NcePlayerScreen(
             return@Box
         }
 
-        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+        ) {
             // Chrome
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
@@ -120,14 +126,31 @@ fun NcePlayerScreen(
 
 @Composable
 private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: CourseTone) {
+    // In landscape, fillMaxWidth + aspectRatio blows the media box past the
+    // screen height (a 16:9 video on a 2400x1080 phone wants 1332px tall),
+    // wiping the controls. Bind height to a fraction of the screen instead
+    // and let aspectRatio drive the width, centred horizontally.
+    val cfg = androidx.compose.ui.platform.LocalConfiguration.current
+    val isLandscape = cfg.screenWidthDp > cfg.screenHeightDp
+
     if (vm.hasVideo) {
-        // Video face: 16:9 SurfaceView wrapped in a black rounded shell.
+        // Video face: SurfaceView wrapped in a black rounded shell.
         // Bound to the ExoPlayer via VM; detached on disposal.
-        Box(
-            modifier = Modifier
+        val aspect = vm.videoAspect.coerceAtLeast(0.6f)
+        val mediaModifier = if (isLandscape) {
+            Modifier
+                .padding(horizontal = 16.dp)
+                .fillMaxHeight(0.42f)
+                .aspectRatio(aspect)
+                .align(Alignment.CenterHorizontally)
+        } else {
+            Modifier
                 .padding(horizontal = 16.dp)
                 .fillMaxWidth()
-                .aspectRatio(vm.videoAspect.coerceAtLeast(0.6f))
+                .aspectRatio(aspect)
+        }
+        Box(
+            modifier = mediaModifier
                 .clip(RoundedCornerShape(14.dp))
                 .background(Color.Black),
         ) {
@@ -142,11 +165,20 @@ private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: Co
             }
         }
     } else {
-        Box(
-            modifier = Modifier
+        val coverModifier = if (isLandscape) {
+            Modifier
+                .padding(horizontal = 32.dp)
+                .fillMaxHeight(0.42f)
+                .aspectRatio(1f)
+                .align(Alignment.CenterHorizontally)
+        } else {
+            Modifier
                 .padding(horizontal = 32.dp)
                 .fillMaxWidth()
                 .aspectRatio(1f)
+        }
+        Box(
+            modifier = coverModifier
                 .clip(RoundedCornerShape(14.dp))
                 .background(tone.gradient),
         ) {
@@ -178,7 +210,7 @@ private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: Co
         }
     }
 
-    Spacer(Modifier.height(20.dp))
+    Spacer(Modifier.height(if (isLandscape) 8.dp else 20.dp))
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -202,25 +234,30 @@ private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: Co
         }
     }
 
-    Spacer(Modifier.height(24.dp))
+    Spacer(Modifier.height(if (isLandscape) 10.dp else 24.dp))
     SliderRow(vm)
     Spacer(Modifier.height(8.dp))
     TransportRow(vm)
     Spacer(Modifier.weight(1f))
 
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 36.dp, vertical = 24.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    // The 课文/单词 flip button shifts focus away from the video. In
+    // landscape the screen is short and the controls already crowd the
+    // bottom, so just drop it — the user can tap the back chevron to
+    // rotate to portrait if they need the lyrics.
+    if (!isLandscape) {
         Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(20.dp))
-                .background(Color(0x33FFFFFF))
-                .clickable { vm.setFlip(true) }
-                .padding(horizontal = 18.dp, vertical = 10.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 36.dp, vertical = 24.dp),
+            horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color(0x33FFFFFF))
+                    .clickable { vm.setFlip(true) }
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
             Icon(
                 Icons.AutoMirrored.Filled.MenuBook,
                 contentDescription = null,
@@ -229,6 +266,7 @@ private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: Co
             )
             Spacer(Modifier.width(6.dp))
             Text("课文 / 单词", color = OnDark, style = MaterialTheme.typography.labelLarge)
+            }
         }
     }
 }
