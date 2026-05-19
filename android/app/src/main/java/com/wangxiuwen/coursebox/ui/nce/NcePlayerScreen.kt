@@ -1,6 +1,7 @@
 package com.wangxiuwen.coursebox.ui.nce
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -151,6 +152,15 @@ private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: Co
         }
         Box(
             modifier = mediaModifier
+                // Visible border so the black SurfaceView doesn't blend
+                // into the page's ScreenBlack gradient stop (especially in
+                // landscape, where the media box sits in the lower half
+                // of the screen where the bg has faded to pure black).
+                .border(
+                    width = 1.dp,
+                    color = Color.White.copy(alpha = 0.18f),
+                    shape = RoundedCornerShape(14.dp),
+                )
                 .clip(RoundedCornerShape(14.dp))
                 .background(Color.Black),
         ) {

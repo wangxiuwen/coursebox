@@ -137,9 +137,21 @@ class NcePlayerVm(context: Context) : ViewModel() {
         library: com.wangxiuwen.coursebox.core.CourseLibrary,
         initialLessonId: String?,
     ) {
-        // Re-loading the same playlist (just navigating back to player from
-        // mini bar) — keep position and don't reset.
-        if (currentPackageId == courseId && lessons === playlist) return
+        // Re-entering the same session (mini player → full player) must
+        // NOT reset playback position. The old guard used reference
+        // equality on `lessons === playlist`, but loadNceLessons builds a
+        // fresh List each call, so the check always failed and the
+        // setMediaItems below restarted from 00:00. We now key the guard
+        // on (courseId, lesson-id list, requested lesson) — same course,
+        // same playlist contents, requested lesson is the one we're
+        // already on → leave the player alone.
+        val playlistIdsMatch = lessons.size == playlist.size &&
+            lessons.zip(playlist).all { (a, b) -> a.id == b.id }
+        val sameLessonRequested = initialLessonId == null ||
+            initialLessonId.isBlank() ||
+            initialLessonId == current?.id
+        if (currentPackageId == courseId && playlistIdsMatch && sameLessonRequested) return
+
         currentPackageId = courseId
         playlist = lessons
         // resolveMediaPath picks the video object for video lessons (so
