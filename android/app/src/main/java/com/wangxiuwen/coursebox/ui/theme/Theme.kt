@@ -63,9 +63,19 @@ private val DarkScheme = darkColorScheme(
     error = AppColors.Error,
 )
 
+/**
+ * Force light scheme everywhere. The Library / NCE list / NCE player UIs
+ * use hard-coded light surfaces (PaperBg #F5F4F1, Color.White cards), so
+ * letting the theme follow the system into dark mode means the text
+ * colour pivots to "#E7EDEF on white" — visually invisible.
+ *
+ * Until we ship proper dark-mode chrome, pin to LightScheme regardless
+ * of the system setting. [useDarkTheme] is kept as a parameter so a
+ * specific call site can opt back in once it has dark-aware surfaces.
+ */
 @Composable
 fun ParrotTheme(
-    useDarkTheme: Boolean = isSystemInDarkTheme(),
+    useDarkTheme: Boolean = false,
     dynamicColor: Boolean = false,
     content: @Composable () -> Unit,
 ) {
