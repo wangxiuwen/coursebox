@@ -137,7 +137,7 @@ fun LibraryTab(
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text("MOSS-TTS · 设备端 (实验)") },
+                            text = { Text("文本朗读 (系统 TTS)") },
                             colors = MenuDefaults.itemColors(
                                 textColor = Color.Black,
                                 leadingIconColor = Color.Black,
