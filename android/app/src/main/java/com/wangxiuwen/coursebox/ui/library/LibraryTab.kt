@@ -177,7 +177,7 @@ fun LibraryTab(
                         shape = RoundedCornerShape(12.dp),
                     ) {
                         DropdownMenuItem(
-                            text = { Text("从本地 zip 导入") },
+                            text = { Text("从本地 .cx 导入") },
                             leadingIcon = {
                                 Icon(Icons.Default.FileDownload, null, tint = Color.Black)
                             },
@@ -187,10 +187,11 @@ fun LibraryTab(
                             ),
                             onClick = {
                                 menuOpen = false
-                                // application/zip covers .cx and .coursebox.zip
-                                // (both are zip under the hood). */* is the
-                                // fallback for filesystems that don't surface
-                                // a MIME for the .cx extension yet.
+                                // .cx is zip under the hood, so the
+                                // application/zip MIME bucket catches it on
+                                // most filesystems. */* is the fallback for
+                                // those that don't surface a MIME for the
+                                // extension yet.
                                 picker.launch(arrayOf("application/zip", "*/*"))
                             },
                         )
@@ -266,7 +267,10 @@ fun LibraryTab(
             }
 
             if (state.packages.isEmpty()) {
-                EmptyState(onTapAdd = { menuOpen = true })
+                // 立即添加 = pick a file directly. Power users with the
+                // overflow menu open already; an empty-state CTA that just
+                // re-opens the same menu in the corner is annoying.
+                EmptyState(onTapAdd = { picker.launch(arrayOf("application/zip", "*/*")) })
             } else {
                 val sorted = remember(state.packages, state.pinned, query) {
                     val order = state.pinned.withIndex().associate { (i, id) -> id to i }
@@ -464,7 +468,7 @@ private fun EmptyState(onTapAdd: () -> Unit) {
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "右上角加号 → 选择本地 .coursebox.zip",
+                    "右上角加号 → 选择本地 .cx 课程包",
                     style = MaterialTheme.typography.bodyMedium,
                     color = InkSoft,
                 )
