@@ -70,7 +70,11 @@ fun NcePlayerScreen(
         }
     }
 
-    val tone = toneFor("nce")
+    // Tone derives from the owning course so the player chrome matches
+    // the library card's hue — purple 900句 stays purple in the player,
+    // red NCE-3 stays red, etc.
+    val pkg = remember(courseId) { library.packageById(courseId) }
+    val tone = toneFor(pkg?.type ?: "nce", pkg?.id ?: courseId)
     val lesson = vm.current ?: vm.playlist.firstOrNull()
     val bgGradient = if (vm.showBack)
         Brush.verticalGradient(listOf(tone.gradMid, tone.gradEnd, ScreenBlack))
@@ -119,7 +123,7 @@ fun NcePlayerScreen(
             if (!vm.showBack) {
                 PlayerFront(vm, lesson, tone)
             } else {
-                PlayerBackLyrics(vm, lesson)
+                PlayerBackLyrics(vm, lesson, tone)
             }
         }
     }
@@ -358,7 +362,7 @@ private fun TransportRow(vm: NcePlayerVm) {
 }
 
 @Composable
-private fun ColumnScope.PlayerBackLyrics(vm: NcePlayerVm, lesson: NceLesson) {
+private fun ColumnScope.PlayerBackLyrics(vm: NcePlayerVm, lesson: NceLesson, tone: CourseTone) {
     val hasWords = lesson.sections.any { it.words.isNotEmpty() }
     val hasQuestion = lesson.question.isNotBlank()
     var selectedTab by rememberSaveable(lesson.id) { mutableStateOf("lines") }
@@ -399,7 +403,7 @@ private fun ColumnScope.PlayerBackLyrics(vm: NcePlayerVm, lesson: NceLesson) {
                 modifier = Modifier
                     .size(44.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(toneFor("nce").gradient),
+                    .background(tone.gradient),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(

@@ -56,6 +56,28 @@ fun CoverArt(id: String, tone: CourseTone, modifier: Modifier = Modifier) {
             4 -> mountains(tone)
             else -> weave(tone)
         }
+        // Top + bottom scrims so the 课次 badge (top-left) and the tone
+        // label / title (bottom) stay readable regardless of which
+        // pattern stroke happens to cross them. ~28% black at the very
+        // edges, fading to transparent in the middle third of the card.
+        drawRect(
+            brush = Brush.verticalGradient(
+                colors = listOf(Color.Black.copy(alpha = 0.30f), Color.Transparent),
+                startY = 0f,
+                endY = size.height * 0.30f,
+            ),
+            size = Size(size.width, size.height * 0.30f),
+            topLeft = Offset(0f, 0f),
+        )
+        drawRect(
+            brush = Brush.verticalGradient(
+                colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.40f)),
+                startY = 0f,
+                endY = size.height * 0.40f,
+            ),
+            size = Size(size.width, size.height * 0.40f),
+            topLeft = Offset(0f, size.height * 0.60f),
+        )
     }
 }
 
