@@ -255,7 +255,13 @@ class LocalSendServer(
 
     private fun isZip(name: String): Boolean {
         val n = name.lowercase()
-        return n.endsWith(".zip") || n.endsWith(".coursebox.zip")
+        // .cx is the current format; .coursebox.zip kept for any old
+        // sender still around. Multi-part suffixes (.cx.part0/.cx.part1)
+        // are also accepted so a multi-part course can travel piece by
+        // piece over LocalSend.
+        return n.endsWith(".cx") ||
+            Regex(".*\\.cx\\.part\\d+$").matches(n) ||
+            n.endsWith(".coursebox.zip")
     }
 
     private fun safeName(name: String): String =
