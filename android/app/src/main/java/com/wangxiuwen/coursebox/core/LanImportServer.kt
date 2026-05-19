@@ -320,6 +320,10 @@ class LanImportServer(
                         setTimeout(function() { progress.classList.remove('on'); }, 800);
                         queue = [];
                         dropText.textContent = '点击选择或拖拽 zip 文件（可多选）';
+                        // Reset the file input + button so the user can pick
+                        // another batch without reloading the page.
+                        fileEl.value = '';
+                        go.disabled = true;
                         return;
                       }
                       var f = pending.shift();
@@ -365,7 +369,13 @@ class LanImportServer(
                     Response.Status.LENGTH_REQUIRED, "text/plain",
                     "missing Content-Length",
                 )
-            val out = File(ctx.cacheDir, "lan-import-${System.currentTimeMillis()}.zip")
+            // UUID instead of currentTimeMillis: two browser PUTs landing in
+            // the same millisecond would collide on the timestamp filename,
+            // and the second import would race on a half-written zip.
+            val out = File(
+                ctx.cacheDir,
+                "lan-import-${java.util.UUID.randomUUID().toString().take(12)}.zip",
+            )
             val buf = ByteArray(64 * 1024)
             var remaining = total
             val input = session.inputStream

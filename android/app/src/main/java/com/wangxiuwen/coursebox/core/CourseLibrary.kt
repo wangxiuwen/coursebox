@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import androidx.compose.runtime.mutableStateOf
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -34,6 +36,16 @@ class CourseLibrary private constructor(
 ) {
     val stateFlow = mutableStateOf(initial)
     val state: CourseLibraryState get() = stateFlow.value
+
+    /**
+     * Serialises every state-mutating import so two LAN uploads that land
+     * back-to-back can't race on the read-modify-write of `state.packages`.
+     * Without this, a concurrent pair would each read the same packages
+     * snapshot, build their newRecords independently, and the second
+     * `stateFlow.value = ...` would clobber the first — making it look like
+     * only one of N batch uploads "took".
+     */
+    private val importMutex = Mutex()
 
     val objectsDir: File get() = File(root, "objects")
     val packagesDir: File get() = File(root, "packages")
@@ -128,9 +140,11 @@ class CourseLibrary private constructor(
     }
 
     suspend fun importLocalFile(zip: File, sourceLabel: String = zip.absolutePath): ImportResult =
-        withContext(Dispatchers.IO) {
+        withContext(Dispatchers.IO) { importMutex.withLock { importLocked(zip, sourceLabel) } }
+
+    private suspend fun importLocked(zip: File, sourceLabel: String): ImportResult {
             require(zip.exists()) { "课程包不存在: $zip" }
-            ZipFile(zip).use { zf ->
+            return ZipFile(zip).use { zf ->
                 val manifestEntry = zf.getEntry("manifest.json")
                     ?: error("课程包缺少 manifest.json")
                 val manifestStr = zf.getInputStream(manifestEntry).use { it.readBytes().toString(Charsets.UTF_8) }
