@@ -121,15 +121,22 @@ object UpdateChecker {
      * filename + size), skip the network round-trip. The size check is
      * what makes this safe to call on every launch.
      *
+     * [onProgress] receives (bytesSoFar, totalBytes) tuples roughly every
+     * 64 KB so the caller can drive a progress bar. totalBytes is the
+     * asset.size if known, otherwise the HTTP Content-Length, otherwise
+     * -1 for unknown.
+     *
      * Caller is responsible for triggering the install Intent later via
-     * [install]. The two are split so the UI can do the long-running
-     * download silently in the background, then prompt the user only when
-     * the APK is ready to install (faster, less awkward than the old
-     * "tap 立即更新 → stare at a spinner for 30s" flow).
+     * [install].
      */
-    suspend fun download(ctx: Context, asset: GhAsset): File = withContext(Dispatchers.IO) {
+    suspend fun download(
+        ctx: Context,
+        asset: GhAsset,
+        onProgress: (bytesSoFar: Long, totalBytes: Long) -> Unit = { _, _ -> },
+    ): File = withContext(Dispatchers.IO) {
         val outFile = File(ctx.cacheDir, "coursebox-update-${asset.name}")
         if (outFile.exists() && asset.size > 0 && outFile.length() == asset.size) {
+            onProgress(asset.size, asset.size)
             return@withContext outFile
         }
         // Stale or partial — start fresh.
@@ -150,8 +157,22 @@ object UpdateChecker {
         try {
             conn.use { c ->
                 if (c.responseCode !in 200..299) error("下载失败 HTTP ${c.responseCode}")
+                val total = when {
+                    asset.size > 0 -> asset.size
+                    else -> c.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
+                }
+                val buf = ByteArray(64 * 1024)
+                var written = 0L
                 c.inputStream.use { input ->
-                    tmp.outputStream().use { input.copyTo(it) }
+                    tmp.outputStream().use { sink ->
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            sink.write(buf, 0, n)
+                            written += n
+                            onProgress(written, total)
+                        }
+                    }
                 }
             }
             if (asset.size > 0 && tmp.length() != asset.size) {

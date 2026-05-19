@@ -1,17 +1,30 @@
 package com.wangxiuwen.coursebox.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.clickable
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -42,6 +55,18 @@ private object Routes {
 /**
  * Single-screen root: 资源库 is the home, all course types drill in from there.
  * Mini player floats on top of every non-player screen.
+ *
+ * Update flow lives here too:
+ *   - LaunchedEffect checks GitHub Releases on launch
+ *   - if newer, show "发现新版本" dialog (with 立即更新 / 稍后)
+ *   - 立即更新 → close dialog immediately, kick off background download
+ *   - while downloading, a thin LinearProgressIndicator sits under the
+ *     status bar so the user can keep using the app and still know the
+ *     update is making progress
+ *   - on download done, show a small "立即安装" pill the user can tap to
+ *     fire the OS install Intent (Android requires user confirm to install)
+ *   - 稍后 in either dialog hides it for this session only; the bar tap
+ *     is sticky so the user can still install later
  */
 @Composable
 fun RootScreen(library: CourseLibrary) {
@@ -52,29 +77,43 @@ fun RootScreen(library: CourseLibrary) {
 
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    var update by remember { mutableStateOf<UpdateAvailable?>(null) }
-    // The downloaded APK file once the silent background fetch finishes. We
-    // only surface the install prompt once this is non-null — so the user
-    // never sees "下载中…" and instead just gets a "ready to install" ask.
-    var readyApk by remember { mutableStateOf<java.io.File?>(null) }
-    var dismissed by rememberSaveable { mutableStateOf(false) }
-    var downloading by remember { mutableStateOf(false) }
-    var downloadError by remember { mutableStateOf<String?>(null) }
 
-    // 1. Check for an update on launch.
-    // 2. If found, immediately kick off a silent background download (the
-    //    user shouldn't have to opt into the slow part — they only confirm
-    //    the final OS install dialog).
-    // The two steps are nested so the download keys off the same effect
-    // lifecycle as the check.
+    // Lifecycle of the update prompt: check → ask → download → install.
+    var update by remember { mutableStateOf<UpdateAvailable?>(null) }
+    var promptDismissed by rememberSaveable { mutableStateOf(false) }
+    var downloadStarted by remember { mutableStateOf(false) }
+    var downloadProgress by remember { mutableFloatStateOf(0f) }
+    var downloadIndeterminate by remember { mutableStateOf(true) }
+    var readyApk by remember { mutableStateOf<java.io.File?>(null) }
+    var downloadError by remember { mutableStateOf<String?>(null) }
+    var installDismissed by rememberSaveable { mutableStateOf(false) }
+
+    // Step 1: check on launch.
     LaunchedEffect(Unit) {
-        val u = UpdateChecker.check(BuildConfig.VERSION_NAME) ?: return@LaunchedEffect
-        update = u
-        downloading = true
-        runCatching { UpdateChecker.download(ctx, u.apkAsset) }
-            .onSuccess { readyApk = it }
-            .onFailure { downloadError = it.message ?: "未知错误" }
-        downloading = false
+        update = UpdateChecker.check(BuildConfig.VERSION_NAME)
+    }
+
+    // Step 2: when the user confirms with 立即更新, run the download in the
+    // background. The dialog has already closed by the time we get here, so
+    // the user can keep navigating; only the slim top progress bar shows.
+    LaunchedEffect(downloadStarted) {
+        if (!downloadStarted) return@LaunchedEffect
+        val u = update ?: return@LaunchedEffect
+        runCatching {
+            UpdateChecker.download(ctx, u.apkAsset) { bytes, total ->
+                if (total > 0) {
+                    downloadIndeterminate = false
+                    downloadProgress = (bytes.toFloat() / total).coerceIn(0f, 1f)
+                } else {
+                    downloadIndeterminate = true
+                }
+            }
+        }.onSuccess { apk ->
+            downloadProgress = 1f
+            readyApk = apk
+        }.onFailure { e ->
+            downloadError = e.message ?: "未知错误"
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -100,6 +139,25 @@ fun RootScreen(library: CourseLibrary) {
             composable(Routes.TTS) { TtsScreen(nav) }
         }
 
+        // Top-of-screen thin progress bar — only shown while we have an
+        // in-flight download. Sits under the status bar via statusBarsPadding
+        // so it doesn't draw behind the system clock. Tapping it once the
+        // download finishes fires the install Intent.
+        if (downloadStarted && (readyApk == null || !installDismissed)) {
+            UpdateProgressBar(
+                progress = downloadProgress,
+                indeterminate = downloadIndeterminate && readyApk == null,
+                ready = readyApk != null,
+                version = update?.latestVersion.orEmpty(),
+                onTap = {
+                    readyApk?.let { apk ->
+                        runCatching { UpdateChecker.install(ctx, apk) }
+                        installDismissed = true
+                    }
+                },
+            )
+        }
+
         if (!isOnPlayer) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -112,40 +170,101 @@ fun RootScreen(library: CourseLibrary) {
             }
         }
 
-        // Only ask the user once the APK is fully downloaded — the silent
-        // background fetch is what makes "立即安装" actually fast. If the
-        // download is still running or failed, we say nothing and let the
-        // next launch retry (the .part-rename in UpdateChecker means we
-        // never leave a half-file masquerading as ready).
-        if (!dismissed && readyApk != null && update != null) {
-            val u = update!!
-            val apk = readyApk!!
+        // Initial "发现新版本" prompt — only the first time, only if download
+        // hasn't been kicked off yet. Tapping 立即更新 closes the dialog and
+        // hands off to the background download.
+        val u = update
+        if (u != null && !promptDismissed && !downloadStarted) {
             AlertDialog(
-                onDismissRequest = { dismissed = true },
+                onDismissRequest = { promptDismissed = true },
                 containerColor = Color.White,
-                title = { Text("新版本 v${u.latestVersion} 已下载") },
+                title = { Text("发现新版本 v${u.latestVersion}") },
                 text = {
                     Text(
                         "当前版本：v${u.currentVersion}\n\n" +
-                            (u.release.body.take(280).ifBlank { "点击立即安装升级到新版本。" }),
+                            (u.release.body.take(280).ifBlank { "点击立即更新, 下载会在后台进行, 不影响使用。" }),
                     )
                 },
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            runCatching { UpdateChecker.install(ctx, apk) }
-                            dismissed = true
+                            downloadStarted = true
+                            promptDismissed = true
                         },
                     ) {
-                        Text("立即安装", color = AccentBlue)
+                        Text("立即更新", color = AccentBlue)
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { dismissed = true }) {
+                    TextButton(onClick = { promptDismissed = true }) {
                         Text("稍后", color = Color(0xFF6B7280))
                     }
                 },
             )
+        }
+    }
+}
+
+@Composable
+private fun UpdateProgressBar(
+    progress: Float,
+    indeterminate: Boolean,
+    ready: Boolean,
+    version: String,
+    onTap: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color(0xCC0E0D0E))
+                .let { if (ready) it.clickable(onClick = onTap) else it }
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (ready) "v$version 已下载, 点击安装" else "后台下载新版本 v$version",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(modifier = Modifier.padding(horizontal = 8.dp))
+                if (!ready && !indeterminate) {
+                    Text(
+                        "${(progress * 100).toInt()}%",
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+        }
+        // The thin animated bar sits just below the pill so a tap on the
+        // pill is the actual install action while still telegraphing
+        // progress visually.
+        Box(modifier = Modifier.fillMaxWidth().padding(top = 38.dp)) {
+            if (!ready) {
+                if (indeterminate) {
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth().height(2.dp),
+                        color = AccentBlue,
+                        trackColor = Color.Transparent,
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.fillMaxWidth().height(2.dp),
+                        color = AccentBlue,
+                        trackColor = Color.Transparent,
+                    )
+                }
+            }
         }
     }
 }
