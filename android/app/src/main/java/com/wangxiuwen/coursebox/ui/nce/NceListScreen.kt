@@ -209,54 +209,6 @@ private fun BookPill(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun LessonMiniCard(
-    lesson: NceLesson,
-    tone: com.wangxiuwen.coursebox.ui.theme.CourseTone,
-) {
-    // A poker-card-ish mini: rank in the top-left + bottom-right corners
-    // (rotated 180° at the bottom for proper deck symmetry), with one
-    // big faint glyph in the centre to give the surface a graphic feel.
-    // Glyph deterministically picked from a small set so adjacent lessons
-    // in the same course still look related but not identical.
-    val rank = lesson.lesson.toString().padStart(2, '0')
-    val glyphs = listOf("♠", "♥", "♦", "♣", "★", "✦", "✧", "❖")
-    val glyph = glyphs[Math.floorMod(lesson.id.hashCode(), glyphs.size)]
-    Box(
-        modifier = Modifier
-            .size(width = 46.dp, height = 62.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(tone.gradient),
-    ) {
-        Text(
-            rank,
-            color = Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Black,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(start = 6.dp, top = 4.dp),
-        )
-        Text(
-            glyph,
-            color = Color.White.copy(alpha = 0.30f),
-            fontSize = 30.sp,
-            fontWeight = FontWeight.Black,
-            modifier = Modifier.align(Alignment.Center),
-        )
-        Text(
-            rank,
-            color = Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Black,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 6.dp, bottom = 4.dp)
-                .graphicsLayer { rotationZ = 180f },
-        )
-    }
-}
-
-@Composable
 private fun LessonRow(
     lesson: NceLesson,
     tone: com.wangxiuwen.coursebox.ui.theme.CourseTone,
@@ -272,11 +224,23 @@ private fun LessonRow(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Playing-card-style mini block. Rank (lesson number) at the
-            // top-left + bottom-right corners; tone short-label (suit) in
-            // the centre. Background is the parent course's tone gradient
-            // so a 900句 list reads purple, NCE-3 reads red, etc.
-            LessonMiniCard(lesson = lesson, tone = tone)
+            // Plain mini block: centred lesson number on the parent
+            // course's tone gradient. (Playing-card chrome moved up to
+            // the library tab; in-course rows stay calm.)
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(tone.gradient),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    lesson.lesson.toString().padStart(2, '0'),
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.ExtraBold,
+                )
+            }
             Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(

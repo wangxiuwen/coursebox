@@ -34,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import com.wangxiuwen.coursebox.BuildConfig
@@ -399,6 +400,39 @@ private fun CourseGridCard(
                     id = pkg.id,
                     tone = tone,
                 )
+                // Playing-card chrome: oversized faint suit-glyph in the
+                // middle + small rank label at the top-left and rotated
+                // copy at the bottom-right. The glyph is picked by id
+                // hash so each card reads as its own face card.
+                val glyphs = listOf("♠", "♥", "♦", "♣", "★", "✦", "✧", "❖")
+                val glyph = glyphs[Math.floorMod(pkg.id.hashCode(), glyphs.size)]
+                val rank = pkg.lessonIndex.size.coerceAtMost(99).toString()
+                Text(
+                    glyph,
+                    color = Color.White.copy(alpha = 0.20f),
+                    fontSize = 110.sp,
+                    fontWeight = FontWeight.Black,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 10.dp, top = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(rank, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Black, lineHeight = 16.sp)
+                    Text(glyph, color = Color.White.copy(alpha = 0.9f), fontSize = 14.sp, fontWeight = FontWeight.Black, lineHeight = 14.sp)
+                }
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 10.dp, bottom = 8.dp)
+                        .graphicsLayer { rotationZ = 180f },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(rank, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Black, lineHeight = 16.sp)
+                    Text(glyph, color = Color.White.copy(alpha = 0.9f), fontSize = 14.sp, fontWeight = FontWeight.Black, lineHeight = 14.sp)
+                }
                 // Direct pin toggle on top-right of the cover. No long-press needed.
                 IconButton(
                     onClick = onTogglePin,
@@ -414,25 +448,23 @@ private fun CourseGridCard(
                         modifier = Modifier.size(20.dp),
                     )
                 }
-                Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
-                    Surface(
-                        color = Color.Black.copy(alpha = 0.32f),
-                        shape = RoundedCornerShape(999.dp),
-                    ) {
-                        Text(
-                            "${pkg.lessonIndex.size} 课次",
-                            color = Color.White,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                        )
-                    }
-                    Spacer(Modifier.weight(1f))
+                // 课次 count badge sits between the pin icon and the centre
+                // glyph so its info is still surfaced without crowding the
+                // poker corners. Tone label removed — the title under the
+                // cover already names the course.
+                Surface(
+                    color = Color.Black.copy(alpha = 0.32f),
+                    shape = RoundedCornerShape(999.dp),
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 10.dp, bottom = 10.dp),
+                ) {
                     Text(
-                        tone.label,
+                        "${pkg.lessonIndex.size} 课次",
                         color = Color.White,
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                     )
                 }
             }
