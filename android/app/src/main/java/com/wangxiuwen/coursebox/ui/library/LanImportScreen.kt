@@ -89,7 +89,11 @@ fun LanImportScreen(library: CourseLibrary, nav: NavHostController) {
             deviceModel = android.os.Build.MODEL,
             deviceType = DeviceType.Mobile,
             fingerprint = fp,
-            port = LocalSend.PORT,
+            // Advertise the LanImportServer port (38723) — that's where the
+            // sender's PUT /raw lands. Discovery itself runs on 53317 as
+            // per the LocalSend spec, but the file-transfer port we point
+            // peers at is the LAN server.
+            port = com.wangxiuwen.coursebox.core.lan.CourseShareClient.LAN_PORT,
             protocol = "http",
             download = false,
         )
