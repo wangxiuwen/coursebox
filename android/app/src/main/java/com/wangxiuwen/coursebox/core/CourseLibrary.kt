@@ -165,11 +165,17 @@ class CourseLibrary private constructor(
     private suspend fun importLocked(zip: File, sourceLabel: String): ImportResult {
         require(zip.exists()) { "课程包不存在: $zip" }
 
-        // 1. Read manifest.json without extracting anything else.
+        // 1. Read manifest.json if present. Single .cx and .cx.part0 both
+        //    have one; .cx.part1..N do not. Absence means "this is a
+        //    continuation part; attach it to whichever course expected it".
         val manifestStr = ZipFile(zip).use { zf ->
-            val me = zf.getEntry("manifest.json") ?: error("课程包缺少 manifest.json")
-            zf.getInputStream(me).use { it.readBytes().toString(Charsets.UTF_8) }
+            zf.getEntry("manifest.json")
+                ?.let { me -> zf.getInputStream(me).use { it.readBytes().toString(Charsets.UTF_8) } }
         }
+        if (manifestStr == null) {
+            return importContinuationPart(zip, sourceLabel)
+        }
+
         val manifest: CoursePackageManifest = json.decodeFromString(manifestStr)
         require(manifest.format == "parrot-course-package" && manifest.version == 1) {
             "课程包格式不兼容: ${manifest.format}@v${manifest.version}"
@@ -187,17 +193,15 @@ class CourseLibrary private constructor(
             zip.copyTo(cxFile, overwrite = true)
         }
 
-        // 3. Index every zip entry's data offset + size, then build
-        //    sha256 → cx:// URI map.
+        // 3. Index every zip entry's data offset + size in THIS part. For
+        //    a single-part .cx this covers every resource; for .cx.part0
+        //    this covers only the subset that part0 carries — the rest of
+        //    the resources get picked up as later partN imports arrive.
         val archive = com.wangxiuwen.coursebox.core.cx.CxArchive.open(cxFile)
-        val resourceIndex = buildCxResourceIndex(archive, cxFile, manifest.resources)
-        val logicalIndex = buildCxLogicalIndex(archive, cxFile, manifest.resources)
+        val resourcesInThisPart = manifest.resources.filter { archive.entryByName(it.path) != null }
+        val resourceIndex = buildCxResourceIndex(archive, cxFile, resourcesInThisPart)
+        val logicalIndex = buildCxLogicalIndex(archive, cxFile, resourcesInThisPart)
 
-        // 4. The lessons_manifest JSON also lives inside the .cx; we read
-        //    it once on demand via loadLessons, but loadNceLessons wants
-        //    a File path today. Stage just that one small JSON to disk so
-        //    legacy code paths keep working. Cheap (each lessons.json is
-        //    1-3 MB).
         val lessonsPath = stageLessonsJson(archive, cxFile, manifest.courses.first().lessonsManifest)
 
         val now = Instant.now().toString()
@@ -219,6 +223,8 @@ class CourseLibrary private constructor(
                 importedAt = now,
                 source = "cx:$sourceLabel",
                 cxPath = cxFile.absolutePath,
+                cxPaths = listOf(cxFile.absolutePath),
+                multipartParts = manifest.multipartParts,
             )
         }
         stateFlow.value = state.copy(packages = replacedPackages + newRecords)
@@ -227,6 +233,51 @@ class CourseLibrary private constructor(
         persist()
 
         return ImportResult(newRecords, resourceIndex.size)
+    }
+
+    /**
+     * Handle a .cx.partN file (N > 0) that has no manifest of its own. We
+     * pick the owning package by matching the part's filename against an
+     * existing package's [CoursePackageRecord.multipartParts]; then index
+     * every `objects/...` entry in the part and merge those into the
+     * owning package's resource_index.
+     */
+    private suspend fun importContinuationPart(zip: File, sourceLabel: String): ImportResult {
+        val filename = sourceLabel
+            .substringAfterLast('/')
+            .substringAfterLast(':')
+        val owning = state.packages.firstOrNull { filename in it.multipartParts }
+            ?: error("课程包 $filename 找不到对应主包 (先导入 .cx.part0)")
+
+        packagesDir.mkdirs()
+        val partFile = File(packagesDir, "cx_${owning.id}_$filename")
+        if (!partFile.exists() || partFile.length() != zip.length()) {
+            zip.copyTo(partFile, overwrite = true)
+        }
+
+        val archive = com.wangxiuwen.coursebox.core.cx.CxArchive.open(partFile)
+        val newEntries = archive.allEntries()
+            .filterKeys { it.startsWith("objects/") }
+            // The on-disk entry name is `objects/<sha>.<ext>`. The sha is
+            // the same we index by, so we don't need the original manifest.
+            .mapNotNull { (path, _) ->
+                val sha = path.removePrefix("objects/").substringBefore('.')
+                if (sha.length != 64) return@mapNotNull null
+                val key = "sha256:$sha"
+                key to com.wangxiuwen.coursebox.core.cx.CxDataSource
+                    .makeUri(partFile, path).toString()
+            }
+            .toMap()
+
+        val merged = owning.copy(
+            cxPaths = (owning.cxPaths + partFile.absolutePath).distinct(),
+            resourceIndex = owning.resourceIndex + newEntries,
+        )
+        stateFlow.value = state.copy(
+            packages = state.packages.map { if (it.id == owning.id) merged else it },
+        )
+        persist()
+        return ImportResult(listOf(merged), newEntries.size)
     }
 
     private fun stageLessonsJson(

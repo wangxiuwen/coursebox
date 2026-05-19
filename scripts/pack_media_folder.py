@@ -90,7 +90,14 @@ def sort_key(path: Path):
     )
 
 
-def pack(src: Path, out: Path, course_id: str, title: str, description: str) -> None:
+def pack(
+    src: Path,
+    out: Path,
+    course_id: str,
+    title: str,
+    description: str,
+    max_part_bytes: int | None = None,
+) -> None:
     if not src.is_dir():
         sys.exit(f"src folder not found: {src}")
     files = sorted(
@@ -180,6 +187,48 @@ def pack(src: Path, out: Path, course_id: str, title: str, description: str) -> 
         "origin": "lessons.json",
     })
 
+    # If the total fits under max_part_bytes, ship a single .cx. Otherwise
+    # split into pack.cx.part0/1/... where part0 carries the manifest.
+    total_size = (
+        len(lessons_bytes) + len(manifest_bytes_placeholder := b"")
+        + sum(info["src"].stat().st_size for info in seen_hashes.values())
+    )
+
+    def assign_parts(max_part_bytes: int) -> list[list[str]]:
+        """Greedy bin-pack: emits a list of part lists (each part = list of
+        sha256 of objects assigned to it). Order preserves resource order
+        so part0 holds the first chunk of media + manifest + lessons.json."""
+        parts = [[]]
+        # First object in part0 is the lessons.json (small, must travel with
+        # the manifest). The manifest itself isn't an object — it's at the
+        # zip root.
+        part_size = len(manifest_bytes_placeholder) + len(lessons_bytes)
+        # Reserve some slack for zip overhead per entry (~46 bytes central
+        # directory + 30 bytes local header + filename).
+        per_entry_overhead = 100
+        part_size += per_entry_overhead
+
+        # The lessons.json hash goes into part0 implicitly. Track all other
+        # objects.
+        for digest, info in seen_hashes.items():
+            size = info["src"].stat().st_size + per_entry_overhead
+            if parts[-1] and part_size + size > max_part_bytes:
+                parts.append([])
+                part_size = per_entry_overhead
+            parts[-1].append(digest)
+            part_size += size
+        return parts
+
+    if max_part_bytes is not None and total_size > max_part_bytes:
+        parts = assign_parts(max_part_bytes)
+    else:
+        parts = [list(seen_hashes.keys())]
+
+    multipart = len(parts) > 1
+    part_filenames = (
+        [f"{out.name}.part{i}" for i in range(len(parts))] if multipart else [out.name]
+    )
+
     manifest = {
         "format": "parrot-course-package",
         "version": 1,
@@ -197,17 +246,36 @@ def pack(src: Path, out: Path, course_id: str, title: str, description: str) -> 
             }
         ],
     }
+    if multipart:
+        manifest["multipart_parts"] = part_filenames
+
     manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    print(f"writing {out}  ({len(files)} lessons, {len(seen_hashes)} unique objects)")
-    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_STORED) as zf:
-        zf.writestr("manifest.json", manifest_bytes)
-        zf.writestr(lessons_path, lessons_bytes)
-        for digest, info in seen_hashes.items():
-            zf.write(info["src"], info["path"])
-    size_mb = out.stat().st_size / 1024 / 1024
-    print(f"  → {size_mb:.1f} MB")
+    if multipart:
+        print(f"writing {len(parts)} parts under {out.parent} ({len(files)} lessons total)")
+        # part0 owns manifest.json + lessons.json + its slice of objects.
+        # Subsequent parts only carry their slice of objects.
+        for idx, digests in enumerate(parts):
+            part_path = out.parent / part_filenames[idx]
+            with zipfile.ZipFile(part_path, "w", compression=zipfile.ZIP_STORED) as zf:
+                if idx == 0:
+                    zf.writestr("manifest.json", manifest_bytes)
+                    zf.writestr(lessons_path, lessons_bytes)
+                for digest in digests:
+                    info = seen_hashes[digest]
+                    zf.write(info["src"], info["path"])
+            part_mb = part_path.stat().st_size / 1024 / 1024
+            print(f"  → {part_path.name}  {part_mb:.1f} MB  ({len(digests)} objects)")
+    else:
+        print(f"writing {out}  ({len(files)} lessons, {len(seen_hashes)} unique objects)")
+        with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_STORED) as zf:
+            zf.writestr("manifest.json", manifest_bytes)
+            zf.writestr(lessons_path, lessons_bytes)
+            for digest, info in seen_hashes.items():
+                zf.write(info["src"], info["path"])
+        size_mb = out.stat().st_size / 1024 / 1024
+        print(f"  → {size_mb:.1f} MB")
 
 
 def main() -> None:
@@ -217,8 +285,21 @@ def main() -> None:
     ap.add_argument("--id", required=True)
     ap.add_argument("--title", required=True)
     ap.add_argument("--description", default="")
+    ap.add_argument(
+        "--max-part-bytes",
+        type=int,
+        default=1_500_000_000,
+        help="split into .cx.partN files when the pack would exceed this size (default 1.5 GB). 0 disables splitting.",
+    )
     args = ap.parse_args()
-    pack(args.src, args.out, args.id, args.title, args.description)
+    pack(
+        args.src,
+        args.out,
+        args.id,
+        args.title,
+        args.description,
+        max_part_bytes=args.max_part_bytes if args.max_part_bytes > 0 else None,
+    )
 
 
 if __name__ == "__main__":

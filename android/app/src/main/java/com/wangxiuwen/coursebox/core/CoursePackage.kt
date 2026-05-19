@@ -64,6 +64,11 @@ data class CoursePackageManifest(
     val generator: String = "",
     val resources: List<CourseResource> = emptyList(),
     val courses: List<CourseEntry> = emptyList(),
+    /** When the pack was split by the packager because it would exceed
+     *  `--max-part-bytes`, this lists every part filename in order
+     *  (e.g. ["name.cx.part0", "name.cx.part1", ...]). Absent for
+     *  single-file packs. */
+    @SerialName("multipart_parts") val multipartParts: List<String> = emptyList(),
 )
 
 /**
@@ -93,9 +98,17 @@ data class CoursePackageRecord(
     @SerialName("logical_path_index") val logicalPathIndex: Map<String, String> = emptyMap(),
     @SerialName("imported_at") val importedAt: String = "",
     val source: String = "",
-    /** Absolute path of the backing .cx file when this record was imported
-     *  via the no-extract path. Null for legacy extracted imports. */
+    /** Absolute path of the *first* backing .cx file (or the only one for
+     *  single-part packs). Kept for back-compat with v1 records; new code
+     *  should read [cxPaths]. Null for legacy extracted imports. */
     @SerialName("cx_path") val cxPath: String? = null,
+    /** Every .cx file backing this record. For multi-part packs the list
+     *  grows as each partN is imported. Single-part packs have one entry. */
+    @SerialName("cx_paths") val cxPaths: List<String> = emptyList(),
+    /** Filenames of the parts the packager declared up-front (from
+     *  manifest.multipart_parts). Empty for single-part packs. Used at
+     *  import time to find which package an arriving partN belongs to. */
+    @SerialName("multipart_parts") val multipartParts: List<String> = emptyList(),
 )
 
 @Serializable
