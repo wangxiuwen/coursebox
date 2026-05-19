@@ -35,7 +35,20 @@ class LanImportServer(
     private val ctx: Context,
     private val library: CourseLibrary,
     private val onProgress: (status: String) -> Unit,
+    private val onEvent: (Event) -> Unit = {},
 ) : NanoHTTPD(SERVER_PORT) {
+
+    /**
+     * Structured progress event surfaced for UI consumers. The old
+     * `onProgress(String)` is still emitted so any caller that only wants
+     * one-line status keeps working; new UIs build a per-file list from
+     * [Event]s.
+     */
+    sealed class Event {
+        data class Started(val filename: String) : Event()
+        data class Done(val filename: String, val message: String) : Event()
+        data class Failed(val filename: String, val message: String) : Event()
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -59,8 +72,13 @@ class LanImportServer(
     private val localSend = LocalSendServer(ctx, library, onProgress)
 
     override fun start(timeout: Int, daemon: Boolean) {
-        super.start(timeout, daemon)
-        runCatching { localSend.start(timeout, daemon) }
+        // NanoHTTPD's default socket read timeout is 5000 ms — that aborts
+        // any single read() that doesn't see new bytes for 5 s, which trips
+        // immediately on a 3.7 GB upload over adb-forward / slow Wi-Fi.
+        // 0 disables the timeout entirely; we want big uploads to actually
+        // finish, and the connection is intra-LAN so an open socket is fine.
+        super.start(0, daemon)
+        runCatching { localSend.start(0, daemon) }
             .onFailure { Log.w(TAG, "localsend start fail", it) }
     }
 
@@ -409,6 +427,7 @@ class LanImportServer(
         val id = java.util.UUID.randomUUID().toString().take(12)
         imports[id] = ImportState("pending", "已接收 $label，正在导入到课程库…")
         onProgress("收到 $label，正在导入…")
+        onEvent(Event.Started(label))
         scope.launch {
             try {
                 val res = library.importLocalFile(src, sourceLabel = "lan://$label")
@@ -416,10 +435,12 @@ class LanImportServer(
                 val msg = "已导入：$titles（${res.addedObjects} 个对象）"
                 imports[id] = ImportState("done", msg)
                 onProgress("✓ $msg")
+                onEvent(Event.Done(label, msg))
             } catch (e: Throwable) {
                 Log.w(TAG, "ingest fail", e)
                 imports[id] = ImportState("error", e.message ?: "未知错误")
                 onProgress("导入失败：${e.message}")
+                onEvent(Event.Failed(label, e.message ?: "未知错误"))
             } finally {
                 runCatching { src.delete() }
             }

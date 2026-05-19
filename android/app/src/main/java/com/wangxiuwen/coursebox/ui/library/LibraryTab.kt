@@ -6,6 +6,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items as lazyItems
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -60,7 +62,9 @@ fun LibraryTab(
     var status by remember { mutableStateOf<String?>(null) }
     var menuOpen by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
-    var lanOpen by remember { mutableStateOf(false) }
+    // Was a state-backed AlertDialog; the LAN import flow moved into its
+    // own `lan_import` route so the QR + results list fit properly in
+    // landscape. Variable kept removed; we now navigate directly.
     var overflowOpen by remember { mutableStateOf(false) }
     var checking by remember { mutableStateOf(false) }
     var updateFound by remember { mutableStateOf<UpdateAvailable?>(null) }
@@ -201,7 +205,7 @@ fun LibraryTab(
                             ),
                             onClick = {
                                 menuOpen = false
-                                lanOpen = true
+                                nav.navigate("lan_import")
                             },
                         )
                     }
@@ -297,14 +301,6 @@ fun LibraryTab(
             }
         }
 
-        if (lanOpen) {
-            LanImportDialog(
-                ctx = ctx,
-                library = library,
-                onDismiss = { lanOpen = false },
-            )
-        }
-
         // Manual "检查更新" path — same split as the auto-launcher: kick off
         // a silent download then prompt to install once the file is on disk.
         updateFound?.let { u ->
@@ -361,69 +357,8 @@ fun LibraryTab(
     }
 }
 
-@Composable
-private fun LanImportDialog(
-    ctx: android.content.Context,
-    library: CourseLibrary,
-    onDismiss: () -> Unit,
-) {
-    var serverStatus by remember { mutableStateOf("启动服务器…") }
-    var url by remember { mutableStateOf<String?>(null) }
-    var qr by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
-    val server = remember {
-        LanImportServer(ctx, library) { msg -> serverStatus = msg }
-    }
-    DisposableEffect(Unit) {
-        runCatching {
-            server.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
-            val u = LanImportServer.url()
-            if (u != null) {
-                url = u
-                qr = LanImportServer.qrBitmap(u, 720)
-                serverStatus = "等待上传…"
-            } else {
-                serverStatus = "未检测到 Wi-Fi，请检查网络"
-            }
-        }.onFailure { serverStatus = "启动失败：${it.message}" }
-        onDispose { runCatching { server.stop() } }
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Color.White,
-        title = { Text("局域网导入") },
-        text = {
-            Column {
-                Text(
-                    "电脑/平板在浏览器打开下面的地址，选 .coursebox.zip 上传。",
-                    color = InkSoft,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Spacer(Modifier.height(12.dp))
-                qr?.let { bmp ->
-                    Image(
-                        bitmap = bmp.asImageBitmap(),
-                        contentDescription = "二维码",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(1f),
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    url ?: "—",
-                    color = Color.Black,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(serverStatus, style = MaterialTheme.typography.bodySmall, color = InkSoft)
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭", color = AccentBlue) }
-        },
-    )
-}
+/** Per-file row tracked by the LAN dialog so the user sees every upload's
+ *  outcome instead of just the last one. */
 
 @Composable
 private fun CourseGridCard(

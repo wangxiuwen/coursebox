@@ -50,6 +50,7 @@ private object Routes {
     const val CHINESE = "chinese/{courseId}"
     const val MUSIC = "music/{courseId}"
     const val TTS = "tts"
+    const val LAN_IMPORT = "lan_import"
 }
 
 /**
@@ -137,6 +138,9 @@ fun RootScreen(library: CourseLibrary) {
                 MusicFoundationScreen(library, courseId, nav)
             }
             composable(Routes.TTS) { TtsScreen(nav) }
+            composable(Routes.LAN_IMPORT) {
+                com.wangxiuwen.coursebox.ui.library.LanImportScreen(library, nav)
+            }
         }
 
         // Top-of-screen thin progress bar — only shown while we have an
