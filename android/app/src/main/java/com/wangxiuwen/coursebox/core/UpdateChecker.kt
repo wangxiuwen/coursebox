@@ -116,13 +116,30 @@ object UpdateChecker {
     }
 
     /**
-     * Download the APK to the app's cache directory then launch the system
-     * Package Installer via FileProvider. Caller has already confirmed via
-     * a dialog. Throws on network/IO failure so the UI can surface it.
+     * Download the APK to the app's cache and return the file. Idempotent —
+     * if a complete download for this asset is already on disk (matched by
+     * filename + size), skip the network round-trip. The size check is
+     * what makes this safe to call on every launch.
+     *
+     * Caller is responsible for triggering the install Intent later via
+     * [install]. The two are split so the UI can do the long-running
+     * download silently in the background, then prompt the user only when
+     * the APK is ready to install (faster, less awkward than the old
+     * "tap 立即更新 → stare at a spinner for 30s" flow).
      */
-    suspend fun downloadAndInstall(ctx: Context, asset: GhAsset): Unit = withContext(Dispatchers.IO) {
+    suspend fun download(ctx: Context, asset: GhAsset): File = withContext(Dispatchers.IO) {
         val outFile = File(ctx.cacheDir, "coursebox-update-${asset.name}")
-        if (outFile.exists()) outFile.delete()
+        if (outFile.exists() && asset.size > 0 && outFile.length() == asset.size) {
+            return@withContext outFile
+        }
+        // Stale or partial — start fresh.
+        outFile.delete()
+
+        // .part rename guard so a killed download never leaves a half-file
+        // looking valid on next launch. We size-check before renaming and
+        // delete on any failure.
+        val tmp = File(ctx.cacheDir, outFile.name + ".part")
+        tmp.delete()
 
         val conn = (URL(asset.browser_download_url).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
@@ -130,20 +147,46 @@ object UpdateChecker {
             readTimeout = 30000
             setRequestProperty("User-Agent", "coursebox-android")
         }
-        conn.use { c ->
-            if (c.responseCode !in 200..299) error("下载失败 HTTP ${c.responseCode}")
-            c.inputStream.use { input ->
-                outFile.outputStream().use { input.copyTo(it) }
+        try {
+            conn.use { c ->
+                if (c.responseCode !in 200..299) error("下载失败 HTTP ${c.responseCode}")
+                c.inputStream.use { input ->
+                    tmp.outputStream().use { input.copyTo(it) }
+                }
             }
+            if (asset.size > 0 && tmp.length() != asset.size) {
+                error("short read: got ${tmp.length()}, expected ${asset.size}")
+            }
+            if (!tmp.renameTo(outFile)) error("rename failed")
+            outFile
+        } catch (e: Throwable) {
+            runCatching { tmp.delete() }
+            throw e
         }
+    }
 
+    /**
+     * Fire the system Package Installer with the already-downloaded APK.
+     * Requires the user to confirm in the OS install dialog — that
+     * confirmation is mandatory on Android and not something we can skip
+     * for unsigned sideloads.
+     */
+    fun install(ctx: Context, apk: File) {
         val authority = "${ctx.packageName}.fileprovider"
-        val uri: Uri = FileProvider.getUriForFile(ctx, authority, outFile)
+        val uri: Uri = FileProvider.getUriForFile(ctx, authority, apk)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         ctx.startActivity(intent)
+    }
+
+    /** Kept as a deprecated alias so any caller that still wires the old
+     *  one-shot path keeps compiling. New code should split it. */
+    @Deprecated("Use download(ctx,asset) then install(ctx,file)")
+    suspend fun downloadAndInstall(ctx: Context, asset: GhAsset) {
+        val apk = download(ctx, asset)
+        install(ctx, apk)
     }
 }

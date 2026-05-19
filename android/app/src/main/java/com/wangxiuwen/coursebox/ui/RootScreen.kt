@@ -26,6 +26,7 @@ import com.wangxiuwen.coursebox.ui.library.LibraryTab
 import com.wangxiuwen.coursebox.ui.music.MusicFoundationScreen
 import com.wangxiuwen.coursebox.ui.nce.NceListScreen
 import com.wangxiuwen.coursebox.ui.nce.NcePlayerScreen
+import com.wangxiuwen.coursebox.ui.tts.TtsScreen
 import com.wangxiuwen.coursebox.ui.theme.AccentBlue
 import kotlinx.coroutines.launch
 
@@ -35,6 +36,7 @@ private object Routes {
     const val NCE_PLAYER = "nce/{courseId}/player/{lessonId}"
     const val CHINESE = "chinese/{courseId}"
     const val MUSIC = "music/{courseId}"
+    const val TTS = "tts"
 }
 
 /**
@@ -51,11 +53,28 @@ fun RootScreen(library: CourseLibrary) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var update by remember { mutableStateOf<UpdateAvailable?>(null) }
+    // The downloaded APK file once the silent background fetch finishes. We
+    // only surface the install prompt once this is non-null — so the user
+    // never sees "下载中…" and instead just gets a "ready to install" ask.
+    var readyApk by remember { mutableStateOf<java.io.File?>(null) }
     var dismissed by rememberSaveable { mutableStateOf(false) }
     var downloading by remember { mutableStateOf(false) }
+    var downloadError by remember { mutableStateOf<String?>(null) }
 
+    // 1. Check for an update on launch.
+    // 2. If found, immediately kick off a silent background download (the
+    //    user shouldn't have to opt into the slow part — they only confirm
+    //    the final OS install dialog).
+    // The two steps are nested so the download keys off the same effect
+    // lifecycle as the check.
     LaunchedEffect(Unit) {
-        update = UpdateChecker.check(BuildConfig.VERSION_NAME)
+        val u = UpdateChecker.check(BuildConfig.VERSION_NAME) ?: return@LaunchedEffect
+        update = u
+        downloading = true
+        runCatching { UpdateChecker.download(ctx, u.apkAsset) }
+            .onSuccess { readyApk = it }
+            .onFailure { downloadError = it.message ?: "未知错误" }
+        downloading = false
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -78,6 +97,7 @@ fun RootScreen(library: CourseLibrary) {
                 val courseId = entry.arguments?.getString("courseId").orEmpty()
                 MusicFoundationScreen(library, courseId, nav)
             }
+            composable(Routes.TTS) { TtsScreen(nav) }
         }
 
         if (!isOnPlayer) {
@@ -92,30 +112,32 @@ fun RootScreen(library: CourseLibrary) {
             }
         }
 
-        update?.takeIf { !dismissed }?.let { u ->
+        // Only ask the user once the APK is fully downloaded — the silent
+        // background fetch is what makes "立即安装" actually fast. If the
+        // download is still running or failed, we say nothing and let the
+        // next launch retry (the .part-rename in UpdateChecker means we
+        // never leave a half-file masquerading as ready).
+        if (!dismissed && readyApk != null && update != null) {
+            val u = update!!
+            val apk = readyApk!!
             AlertDialog(
                 onDismissRequest = { dismissed = true },
                 containerColor = Color.White,
-                title = { Text("发现新版本 v${u.latestVersion}") },
+                title = { Text("新版本 v${u.latestVersion} 已下载") },
                 text = {
                     Text(
                         "当前版本：v${u.currentVersion}\n\n" +
-                            (u.release.body.take(280).ifBlank { "点击下载并安装新版本。" })
+                            (u.release.body.take(280).ifBlank { "点击立即安装升级到新版本。" }),
                     )
                 },
                 confirmButton = {
                     TextButton(
-                        enabled = !downloading,
                         onClick = {
-                            downloading = true
-                            scope.launch {
-                                runCatching { UpdateChecker.downloadAndInstall(ctx, u.apkAsset) }
-                                downloading = false
-                                dismissed = true
-                            }
+                            runCatching { UpdateChecker.install(ctx, apk) }
+                            dismissed = true
                         },
                     ) {
-                        Text(if (downloading) "下载中…" else "立即更新", color = AccentBlue)
+                        Text("立即安装", color = AccentBlue)
                     }
                 },
                 dismissButton = {

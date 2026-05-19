@@ -136,6 +136,17 @@ fun LibraryTab(
                                 }
                             },
                         )
+                        DropdownMenuItem(
+                            text = { Text("MOSS-TTS · 设备端 (实验)") },
+                            colors = MenuDefaults.itemColors(
+                                textColor = Color.Black,
+                                leadingIconColor = Color.Black,
+                            ),
+                            onClick = {
+                                overflowOpen = false
+                                nav.navigate("tts")
+                            },
+                        )
                     }
                 }
                 Box {
@@ -290,6 +301,8 @@ fun LibraryTab(
             )
         }
 
+        // Manual "检查更新" path — same split as the auto-launcher: kick off
+        // a silent download then prompt to install once the file is on disk.
         updateFound?.let { u ->
             AlertDialog(
                 onDismissRequest = { updateFound = null },
@@ -297,8 +310,9 @@ fun LibraryTab(
                 title = { Text("发现新版本 v${u.latestVersion}") },
                 text = {
                     Text(
-                        "当前版本：v${u.currentVersion}\n\n" +
-                            (u.release.body.take(280).ifBlank { "点击下载并安装新版本。" })
+                        if (downloading) "正在后台下载…完成后会提示安装。"
+                        else "当前版本：v${u.currentVersion}\n\n" +
+                            (u.release.body.take(280).ifBlank { "点击立即下载, 完成后再确认安装。" }),
                     )
                 },
                 confirmButton = {
@@ -307,13 +321,16 @@ fun LibraryTab(
                         onClick = {
                             downloading = true
                             scope.launch {
-                                runCatching { UpdateChecker.downloadAndInstall(ctx, u.apkAsset) }
+                                runCatching { UpdateChecker.download(ctx, u.apkAsset) }
+                                    .onSuccess { apk ->
+                                        UpdateChecker.install(ctx, apk)
+                                    }
                                 downloading = false
                                 updateFound = null
                             }
                         },
                     ) {
-                        Text(if (downloading) "下载中…" else "立即更新", color = AccentBlue)
+                        Text(if (downloading) "下载中…" else "立即下载", color = AccentBlue)
                     }
                 },
                 dismissButton = {
