@@ -258,8 +258,11 @@ fun LibraryTab(
                         .sortedBy { order[it.id] ?: Int.MAX_VALUE }
                         .toList()
                 }
+                // Adaptive so tablets (esp. landscape, ~1280dp) get more columns
+                // instead of two huge half-screen cards. minSize=160dp keeps
+                // phones at 2 columns and lets a 10" tablet land on 6-8.
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(2),
+                    columns = GridCells.Adaptive(minSize = 160.dp),
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         start = 12.dp, end = 12.dp, top = 6.dp, bottom = 130.dp,
@@ -524,10 +527,12 @@ private fun EmptyState(onTapAdd: () -> Unit) {
 }
 
 private fun openCourse(record: CoursePackageRecord, nav: NavHostController) {
-    val type = record.type
-    when {
-        type == "nce" || record.id.startsWith("nce") -> nav.navigate("nce/${record.id}")
-        type == "chinese_poetry" -> nav.navigate("chinese/${record.id}")
-        type == "music" -> nav.navigate("music/${record.id}")
+    when (record.type) {
+        "chinese_poetry" -> nav.navigate("chinese/${record.id}")
+        "music" -> nav.navigate("music/${record.id}")
+        // nce / video / mixed / audio_course / anything else → list+player.
+        // NcePlayerScreen already routes to a SurfaceView when the lesson
+        // has video_hash, so video packs flow through the same screen.
+        else -> nav.navigate("nce/${record.id}")
     }
 }
