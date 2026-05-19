@@ -176,20 +176,37 @@ class CxArchive private constructor(
                 bb.position(10)
                 val method = bb.short.toInt() and 0xffff
                 bb.position(20)
-                val compressedSize = bb.int.toLong() and 0xffffffffL
-                val uncompressedSize = bb.int.toLong() and 0xffffffffL
+                var compressedSize = bb.int.toLong() and 0xffffffffL
+                var uncompressedSize = bb.int.toLong() and 0xffffffffL
                 bb.position(28)
                 val filenameLen = bb.short.toInt() and 0xffff
                 val extraLen = bb.short.toInt() and 0xffff
                 val commentLen = bb.short.toInt() and 0xffff
                 bb.position(42)
-                val localHeaderOffset = bb.int.toLong() and 0xffffffffL
+                var localHeaderOffset = bb.int.toLong() and 0xffffffffL
 
                 val name = ByteArray(filenameLen).also { raf.readFully(it) }.toString(Charsets.UTF_8)
-                // Skip variable-length extra + comment to advance to next CD entry
-                if (extraLen + commentLen > 0) {
-                    raf.skipBytes(extraLen + commentLen)
+
+                // ZIP64 extended-info extra field: when the uint32 size or
+                // offset is 0xFFFFFFFF, the real value lives in the extra
+                // block. Python's zipfile writes the offset into ZIP64 the
+                // moment header_offset > 2 GiB (signed-int boundary) — so
+                // any pack > 2 GB needs this even when the absolute offset
+                // would still fit in uint32.
+                if (extraLen > 0) {
+                    val extra = ByteArray(extraLen).also { raf.readFully(it) }
+                    parseZip64Extra(
+                        extra,
+                        wantUncompressed = uncompressedSize == 0xffffffffL,
+                        wantCompressed = compressedSize == 0xffffffffL,
+                        wantOffset = localHeaderOffset == 0xffffffffL,
+                    )?.let { (u, c, o) ->
+                        if (u != null) uncompressedSize = u
+                        if (c != null) compressedSize = c
+                        if (o != null) localHeaderOffset = o
+                    }
                 }
+                if (commentLen > 0) raf.skipBytes(commentLen)
 
                 if (method != 0) {
                     Log.w(TAG, "$name uses compression $method; skipping (only STORED supported)")
@@ -216,6 +233,40 @@ class CxArchive private constructor(
                 map[name] = Entry(name, dataOffset, compressedSize)
             }
             return map
+        }
+
+        /**
+         * Pull (uncompressedSize, compressedSize, localHeaderOffset) out of
+         * a ZIP64 extra block — but only the fields the caller asked for
+         * (i.e. the ones whose uint32 was 0xFFFFFFFF). Order in the block
+         * is fixed by the spec: uncompressed, compressed, offset.
+         *
+         * Returns null if no ZIP64 extra was found.
+         */
+        private fun parseZip64Extra(
+            extra: ByteArray,
+            wantUncompressed: Boolean,
+            wantCompressed: Boolean,
+            wantOffset: Boolean,
+        ): Triple<Long?, Long?, Long?>? {
+            val bb = ByteBuffer.wrap(extra).order(ByteOrder.LITTLE_ENDIAN)
+            while (bb.remaining() >= 4) {
+                val id = bb.short.toInt() and 0xffff
+                val size = bb.short.toInt() and 0xffff
+                if (id != 0x0001) {
+                    bb.position(bb.position() + size)
+                    continue
+                }
+                val start = bb.position()
+                var u: Long? = null
+                var c: Long? = null
+                var o: Long? = null
+                if (wantUncompressed && bb.position() - start + 8 <= size) u = bb.long
+                if (wantCompressed && bb.position() - start + 8 <= size) c = bb.long
+                if (wantOffset && bb.position() - start + 8 <= size) o = bb.long
+                return Triple(u, c, o)
+            }
+            return null
         }
     }
 }
