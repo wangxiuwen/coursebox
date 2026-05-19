@@ -165,18 +165,40 @@ private fun decodeLines(node: JsonElement?): List<NceLine> {
 }
 
 // Live NCE packages put English in section titled "...课文" and the
-// matching Chinese in "...翻译". Zip them index-wise; pad the short side
-// with blanks so we don't drop lines when paragraph counts diverge.
+// matching Chinese in "...翻译". 英语900句 instead inlines both languages
+// on the same line of a "句子" section, separated by "—" (em-dash), e.g.
+//   "1. Hello! / Hi! — 你好！"
+// Both shapes get folded into the [NceLine] list so downstream
+// auto-scroll / highlight logic doesn't care which course the lesson
+// came from.
+private val EN_CN_SEPARATOR = Regex("\\s*[—–]\\s*")
+private val LEADING_NUMBER = Regex("^\\s*\\d+[.、)]\\s*")
+
 private fun buildLinesFromSections(sections: List<NceSection>): List<NceLine> {
+    // Preferred shape: parallel "课文" + "翻译" sections.
     val en = sections.firstOrNull { it.type == "text" && it.title.contains("课文") }?.text.orEmpty()
     val cn = sections.firstOrNull { it.type == "text" && it.title.contains("翻译") }?.text.orEmpty()
-    if (en.isEmpty() && cn.isEmpty()) return emptyList()
-    val n = maxOf(en.size, cn.size)
-    return (0 until n).map { i ->
-        NceLine(
-            en = en.getOrNull(i).orEmpty().trim(),
-            cn = cn.getOrNull(i).orEmpty().trim(),
-        )
+    if (en.isNotEmpty() || cn.isNotEmpty()) {
+        val n = maxOf(en.size, cn.size)
+        return (0 until n).map { i ->
+            NceLine(
+                en = en.getOrNull(i).orEmpty().trim(),
+                cn = cn.getOrNull(i).orEmpty().trim(),
+            )
+        }
+    }
+    // Fallback: a single text section (e.g. "句子" for 英语900) where
+    // each line is "English — 中文". Strip a leading "1. " ordinal and
+    // split on the em-dash.
+    val merged = sections.firstOrNull { it.type == "text" && it.text.isNotEmpty() }?.text.orEmpty()
+    if (merged.isEmpty()) return emptyList()
+    return merged.map { raw ->
+        val stripped = raw.replace(LEADING_NUMBER, "").trim()
+        val parts = stripped.split(EN_CN_SEPARATOR, limit = 2)
+        when (parts.size) {
+            2 -> NceLine(en = parts[0].trim(), cn = parts[1].trim())
+            else -> NceLine(en = stripped, cn = "")
+        }
     }
 }
 
