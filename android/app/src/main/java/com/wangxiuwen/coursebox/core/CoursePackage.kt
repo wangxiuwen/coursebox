@@ -83,10 +83,19 @@ data class CoursePackageRecord(
     val metadata: Map<String, JsonElement> = emptyMap(),
     @SerialName("lessons_manifest_path") val lessonsManifestPath: String,
     @SerialName("lesson_index") val lessonIndex: List<LessonIndexEntry> = emptyList(),
+    /**
+     * sha256 → cx:// URI (new no-extract path) OR absolute file path
+     * (legacy extracted import). Players & resolvers must accept both
+     * shapes — anything starting with "cx:" goes through CxDataSource,
+     * anything else is a plain file path.
+     */
     @SerialName("resource_index") val resourceIndex: Map<String, String> = emptyMap(),
     @SerialName("logical_path_index") val logicalPathIndex: Map<String, String> = emptyMap(),
     @SerialName("imported_at") val importedAt: String = "",
     val source: String = "",
+    /** Absolute path of the backing .cx file when this record was imported
+     *  via the no-extract path. Null for legacy extracted imports. */
+    @SerialName("cx_path") val cxPath: String? = null,
 )
 
 @Serializable

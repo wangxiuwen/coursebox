@@ -82,7 +82,14 @@ class NcePlayerVm(context: Context) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var tickJob: Job? = null
 
-    private val player: ExoPlayer = ExoPlayer.Builder(appCtx).build().also { p ->
+    private val player: ExoPlayer = ExoPlayer.Builder(appCtx)
+        .setMediaSourceFactory(
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(appCtx)
+                .setDataSourceFactory(
+                    com.wangxiuwen.coursebox.core.cx.CxOrDefaultDataSourceFactory(appCtx),
+                ),
+        )
+        .build().also { p ->
         p.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
@@ -214,9 +221,18 @@ class NcePlayerVm(context: Context) : ViewModel() {
         super.onCleared()
     }
 
-    /** Resource URIs come from absolute paths; ExoPlayer accepts `file://` natively. */
-    private fun toUri(path: String): android.net.Uri =
-        if (path.startsWith("http")) android.net.Uri.parse(path) else android.net.Uri.fromFile(java.io.File(path))
+    /**
+     * Convert a resource string from CourseLibrary into a Uri ExoPlayer
+     * can consume:
+     *   - "cx:///..."   → custom no-extract scheme, parsed verbatim
+     *   - "http(s)://"  → remote URL (legacy NCE-900 audio)
+     *   - everything else → treat as an absolute filesystem path
+     */
+    private fun toUri(path: String): android.net.Uri = when {
+        path.startsWith("cx:") -> android.net.Uri.parse(path)
+        path.startsWith("http") -> android.net.Uri.parse(path)
+        else -> android.net.Uri.fromFile(java.io.File(path))
+    }
 }
 
 /** Convenience factory so callers can `viewModel { NcePlayerVm.factory(ctx) }`. */

@@ -183,6 +183,10 @@ fun LibraryTab(
                             ),
                             onClick = {
                                 menuOpen = false
+                                // application/zip covers .cx and .coursebox.zip
+                                // (both are zip under the hood). */* is the
+                                // fallback for filesystems that don't surface
+                                // a MIME for the .cx extension yet.
                                 picker.launch(arrayOf("application/zip", "*/*"))
                             },
                         )

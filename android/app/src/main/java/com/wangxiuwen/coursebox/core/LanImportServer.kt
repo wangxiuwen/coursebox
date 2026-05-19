@@ -181,8 +181,8 @@ class LanImportServer(
             <body>
               <div class="card">
                 <h1>📦 导入课程</h1>
-                <p class="sub">选一个 <code>.coursebox.zip</code> 上传到手机。</p>
-                <input id="file" type="file" multiple accept=".zip,.coursebox.zip,application/zip">
+                <p class="sub">选一个 <code>.cx</code> 课程包上传到手机 (旧 <code>.coursebox.zip</code> 也兼容)。</p>
+                <input id="file" type="file" multiple accept=".cx,.zip,.coursebox.zip,application/zip">
                 <label class="drop" id="drop" for="file">
                   <span id="dropText">点击选择或拖拽 zip 文件（可多选）</span>
                 </label>

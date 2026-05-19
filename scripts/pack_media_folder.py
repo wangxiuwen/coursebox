@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pack a flat folder of mp3 / mp4 / m4a / wav files as a `.coursebox.zip`.
+Pack a flat folder of mp3 / mp4 / m4a / wav files as a `.cx` archive.
 
 Each file becomes one lesson. The packer auto-detects audio vs video from
 the file's MIME and writes the sha256 hash to `audio_hash` or `video_hash`

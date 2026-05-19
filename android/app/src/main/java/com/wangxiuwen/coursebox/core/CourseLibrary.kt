@@ -65,7 +65,7 @@ class CourseLibrary private constructor(
         val norm = if (hash.startsWith("sha256:")) hash else "sha256:$hash"
         for (pkg in state.packages) {
             val path = pkg.resourceIndex[norm]
-            if (path != null && File(path).exists()) return path
+            if (path != null && isUsable(path)) return path
         }
         return null
     }
@@ -74,9 +74,21 @@ class CourseLibrary private constructor(
         val norm = normalizeLogicalPath(logical)
         for (pkg in state.packages) {
             val path = pkg.logicalPathIndex[norm]
-            if (path != null && File(path).exists()) return path
+            if (path != null && isUsable(path)) return path
         }
         return null
+    }
+
+    /** A "resource path" from the index is either a `cx://` URI (the no-extract
+     *  path — validated at lookup time only by checking the backing .cx file
+     *  still exists) or an absolute filesystem path (legacy extracted import). */
+    private fun isUsable(path: String): Boolean {
+        if (path.startsWith("cx:")) {
+            // Find the backing .cx via the owning package record. Cheap —
+            // there are only a handful of packages.
+            return state.packages.any { it.cxPath?.let { File(it).exists() } == true }
+        }
+        return File(path).exists()
     }
 
     fun resolve(hash: String? = null, logicalPath: String? = null): String? {
@@ -142,62 +154,116 @@ class CourseLibrary private constructor(
     suspend fun importLocalFile(zip: File, sourceLabel: String = zip.absolutePath): ImportResult =
         withContext(Dispatchers.IO) { importMutex.withLock { importLocked(zip, sourceLabel) } }
 
+    /**
+     * No-extract import: copy the .cx (any zip with STORED entries works,
+     * regardless of the extension) under the library root, then index
+     * the central directory so every object's byte offset is known.
+     * Playback uses [com.wangxiuwen.coursebox.core.cx.CxDataSource] to
+     * read slices directly from the .cx file — never expands objects to
+     * disk, so a 3.7 GB pack takes ~3.7 GB instead of ~7.4 GB.
+     */
     private suspend fun importLocked(zip: File, sourceLabel: String): ImportResult {
-            require(zip.exists()) { "课程包不存在: $zip" }
-            return ZipFile(zip).use { zf ->
-                val manifestEntry = zf.getEntry("manifest.json")
-                    ?: error("课程包缺少 manifest.json")
-                val manifestStr = zf.getInputStream(manifestEntry).use { it.readBytes().toString(Charsets.UTF_8) }
-                val manifest: CoursePackageManifest = json.decodeFromString(manifestStr)
-                require(manifest.format == "parrot-course-package" && manifest.version == 1) {
-                    "课程包格式不兼容: ${manifest.format}@v${manifest.version}"
-                }
+        require(zip.exists()) { "课程包不存在: $zip" }
 
-                objectsDir.mkdirs()
-                packagesDir.mkdirs()
+        // 1. Read manifest.json without extracting anything else.
+        val manifestStr = ZipFile(zip).use { zf ->
+            val me = zf.getEntry("manifest.json") ?: error("课程包缺少 manifest.json")
+            zf.getInputStream(me).use { it.readBytes().toString(Charsets.UTF_8) }
+        }
+        val manifest: CoursePackageManifest = json.decodeFromString(manifestStr)
+        require(manifest.format == "parrot-course-package" && manifest.version == 1) {
+            "课程包格式不兼容: ${manifest.format}@v${manifest.version}"
+        }
 
-                var added = 0
-                for (entry in zf.entries()) {
-                    if (entry.isDirectory) continue
-                    if (!entry.name.startsWith("objects/")) continue
-                    val target = File(root, entry.name)
-                    if (target.exists()) continue
-                    target.parentFile?.mkdirs()
-                    zf.getInputStream(entry).use { input ->
-                        target.outputStream().use { input.copyTo(it) }
-                    }
-                    added++
-                }
+        packagesDir.mkdirs()
 
-                val resourceIndex = buildResourceIndex(manifest.resources)
-                val logicalIndex = buildLogicalIndex(manifest.resources)
+        // 2. Move the .cx into the library so its byte ranges stay valid
+        //    across app restarts and the temp file from LAN-import can be
+        //    deleted by the caller. Filename keyed by the manifest digest
+        //    so the same content lands in one file.
+        val cxDigest = sha256(manifestStr.toByteArray())
+        val cxFile = File(packagesDir, "cx_$cxDigest.cx")
+        if (!cxFile.exists() || cxFile.length() != zip.length()) {
+            zip.copyTo(cxFile, overwrite = true)
+        }
 
-                val now = Instant.now().toString()
-                val incomingIds = manifest.courses.map { it.id }.toSet()
-                val replacedPackages = state.packages.filter { it.id !in incomingIds }
-                val newRecords = manifest.courses.map { c ->
-                    CoursePackageRecord(
-                        id = c.id,
-                        title = c.title,
-                        description = c.description,
-                        type = c.type,
-                        metadata = c.metadata,
-                        lessonsManifestPath = File(root, c.lessonsManifest).absolutePath,
-                        lessonIndex = c.lessonIndex,
-                        resourceIndex = resourceIndex,
-                        logicalPathIndex = logicalIndex,
-                        importedAt = now,
-                        source = "zip:$sourceLabel",
-                    )
-                }
-                stateFlow.value = state.copy(packages = replacedPackages + newRecords)
+        // 3. Index every zip entry's data offset + size, then build
+        //    sha256 → cx:// URI map.
+        val archive = com.wangxiuwen.coursebox.core.cx.CxArchive.open(cxFile)
+        val resourceIndex = buildCxResourceIndex(archive, cxFile, manifest.resources)
+        val logicalIndex = buildCxLogicalIndex(archive, cxFile, manifest.resources)
 
-                val digest = sha256(manifestStr.toByteArray())
-                File(packagesDir, "manifest_$digest.json").writeText(manifestStr)
-                persist()
+        // 4. The lessons_manifest JSON also lives inside the .cx; we read
+        //    it once on demand via loadLessons, but loadNceLessons wants
+        //    a File path today. Stage just that one small JSON to disk so
+        //    legacy code paths keep working. Cheap (each lessons.json is
+        //    1-3 MB).
+        val lessonsPath = stageLessonsJson(archive, cxFile, manifest.courses.first().lessonsManifest)
 
-                ImportResult(newRecords, added)
-            }
+        val now = Instant.now().toString()
+        val incomingIds = manifest.courses.map { it.id }.toSet()
+        val replacedPackages = state.packages.filter { it.id !in incomingIds }
+        val newRecords = manifest.courses.map { c ->
+            val perCourseLessonsPath = if (c.lessonsManifest == manifest.courses.first().lessonsManifest)
+                lessonsPath else stageLessonsJson(archive, cxFile, c.lessonsManifest)
+            CoursePackageRecord(
+                id = c.id,
+                title = c.title,
+                description = c.description,
+                type = c.type,
+                metadata = c.metadata,
+                lessonsManifestPath = perCourseLessonsPath,
+                lessonIndex = c.lessonIndex,
+                resourceIndex = resourceIndex,
+                logicalPathIndex = logicalIndex,
+                importedAt = now,
+                source = "cx:$sourceLabel",
+                cxPath = cxFile.absolutePath,
+            )
+        }
+        stateFlow.value = state.copy(packages = replacedPackages + newRecords)
+
+        File(packagesDir, "manifest_$cxDigest.json").writeText(manifestStr)
+        persist()
+
+        return ImportResult(newRecords, resourceIndex.size)
+    }
+
+    private fun stageLessonsJson(
+        archive: com.wangxiuwen.coursebox.core.cx.CxArchive,
+        cxFile: File,
+        entryPath: String,
+    ): String {
+        val entry = archive.entryByName(entryPath)
+            ?: error("lessons_manifest missing in .cx: $entryPath")
+        val staged = File(packagesDir, "lessons_${entryPath.substringAfterLast('/').substringBefore('.')}.json")
+        if (!staged.exists() || staged.length() != entry.size) {
+            staged.writeBytes(archive.readBytes(entry, 0, entry.size.toInt()))
+        }
+        return staged.absolutePath
+    }
+
+    private fun buildCxResourceIndex(
+        archive: com.wangxiuwen.coursebox.core.cx.CxArchive,
+        cxFile: File,
+        resources: List<CourseResource>,
+    ): Map<String, String> = resources.associate { r ->
+        val key = if (r.hash.startsWith("sha256:")) r.hash else "sha256:${r.hash}"
+        val entry = archive.entryByName(r.path)
+            ?: error("resource not in .cx: ${r.path}")
+        key to com.wangxiuwen.coursebox.core.cx.CxDataSource.makeUri(cxFile, entry.name).toString()
+    }
+
+    private fun buildCxLogicalIndex(
+        archive: com.wangxiuwen.coursebox.core.cx.CxArchive,
+        cxFile: File,
+        resources: List<CourseResource>,
+    ): Map<String, String> = resources.filter { it.origin.isNotBlank() }
+        .associate { r ->
+            val entry = archive.entryByName(r.path)
+                ?: error("resource not in .cx: ${r.path}")
+            normalizeLogicalPath(r.origin) to
+                com.wangxiuwen.coursebox.core.cx.CxDataSource.makeUri(cxFile, entry.name).toString()
         }
 
     private fun buildResourceIndex(resources: List<CourseResource>): Map<String, String> =
