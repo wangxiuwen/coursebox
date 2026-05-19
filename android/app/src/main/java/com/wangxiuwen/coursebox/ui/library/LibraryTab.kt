@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.MoreVert
@@ -296,6 +297,7 @@ fun LibraryTab(
                             onClick = { openCourse(pkg, nav) },
                             onTogglePin = { scope.launch { library.togglePinned(pkg.id) } },
                             onDelete = { scope.launch { library.removePackage(pkg.id) } },
+                            onShare = { nav.navigate("share/${pkg.id}") },
                         )
                     }
                 }
@@ -369,6 +371,7 @@ private fun CourseGridCard(
     onClick: () -> Unit,
     onTogglePin: () -> Unit,
     onDelete: () -> Unit,
+    onShare: () -> Unit,
 ) {
     val tone = toneFor(pkg.type, pkg.id)
     var sheetOpen by remember { mutableStateOf(false) }
@@ -494,6 +497,11 @@ private fun CourseGridCard(
                     icon = Icons.Default.PushPin,
                     label = if (isPinned) "取消置顶" else "置顶",
                     onClick = { sheetOpen = false; onTogglePin() },
+                )
+                SheetAction(
+                    icon = Icons.Default.Share,
+                    label = "分享到设备 (局域网)",
+                    onClick = { sheetOpen = false; onShare() },
                 )
                 SheetAction(
                     icon = Icons.Default.Delete,

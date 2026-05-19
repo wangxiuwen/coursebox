@@ -51,6 +51,7 @@ private object Routes {
     const val MUSIC = "music/{courseId}"
     const val TTS = "tts"
     const val LAN_IMPORT = "lan_import"
+    const val SHARE = "share/{courseId}"
 }
 
 /**
@@ -140,6 +141,10 @@ fun RootScreen(library: CourseLibrary) {
             composable(Routes.TTS) { TtsScreen(nav) }
             composable(Routes.LAN_IMPORT) {
                 com.wangxiuwen.coursebox.ui.library.LanImportScreen(library, nav)
+            }
+            composable(Routes.SHARE) { entry ->
+                val cid = entry.arguments?.getString("courseId").orEmpty()
+                com.wangxiuwen.coursebox.ui.share.ShareScreen(library, cid, nav)
             }
         }
 
