@@ -4,6 +4,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -14,6 +15,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.MoreVert
@@ -140,17 +142,9 @@ fun LibraryTab(
                                 }
                             },
                         )
-                        DropdownMenuItem(
-                            text = { Text("文本朗读 (系统 TTS)") },
-                            colors = MenuDefaults.itemColors(
-                                textColor = Color.Black,
-                                leadingIconColor = Color.Black,
-                            ),
-                            onClick = {
-                                overflowOpen = false
-                                nav.navigate("tts")
-                            },
-                        )
+                        // 文本朗读 (TTS) is an *in-lesson* assist for
+                        // plain-text courses, not a top-level menu item —
+                        // hidden here until it's wired into the reader view.
                     }
                 }
                 Box {
@@ -299,6 +293,7 @@ fun LibraryTab(
                             isPinned = pkg.id in state.pinned,
                             onClick = { openCourse(pkg, nav) },
                             onTogglePin = { scope.launch { library.togglePinned(pkg.id) } },
+                            onDelete = { scope.launch { library.removePackage(pkg.id) } },
                         )
                     }
                 }
@@ -364,18 +359,26 @@ fun LibraryTab(
 /** Per-file row tracked by the LAN dialog so the user sees every upload's
  *  outcome instead of just the last one. */
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun CourseGridCard(
     pkg: CoursePackageRecord,
     isPinned: Boolean,
     onClick: () -> Unit,
     onTogglePin: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     val tone = toneFor(pkg.type, pkg.id)
+    var sheetOpen by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { sheetOpen = true },
+            ),
         shape = RoundedCornerShape(16.dp),
         color = Color.White,
         shadowElevation = 1.dp,
@@ -449,6 +452,95 @@ private fun CourseGridCard(
                 )
             }
         }
+    }
+
+    if (sheetOpen) {
+        ModalBottomSheet(
+            onDismissRequest = { sheetOpen = false },
+            containerColor = Color.White,
+        ) {
+            Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                Text(
+                    pkg.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.Black,
+                    modifier = Modifier.padding(horizontal = 22.dp, vertical = 8.dp),
+                )
+                Text(
+                    "${pkg.lessonIndex.size} 课次 · ${tone.label}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = InkSoft,
+                    modifier = Modifier.padding(start = 22.dp, end = 22.dp, bottom = 12.dp),
+                )
+                SheetAction(
+                    icon = Icons.Default.PushPin,
+                    label = if (isPinned) "取消置顶" else "置顶",
+                    onClick = { sheetOpen = false; onTogglePin() },
+                )
+                SheetAction(
+                    icon = Icons.Default.Delete,
+                    label = "删除课程包",
+                    tint = Color(0xFFC93B3B),
+                    onClick = { sheetOpen = false; confirmDelete = true },
+                )
+            }
+        }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            containerColor = Color.White,
+            title = { Text("删除 ${pkg.title}?", color = Color.Black) },
+            text = {
+                Text(
+                    "将从设备移除该课程包的 .cx 文件 (释放 ${humanBytes(pkg)} 空间). 此操作不可撤销.",
+                    color = InkSoft,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    onDelete()
+                }) { Text("删除", color = Color(0xFFC93B3B)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) {
+                    Text("取消", color = InkSoft)
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun SheetAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    tint: Color = Color.Black,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 22.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(14.dp))
+        Text(label, color = tint, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+private fun humanBytes(pkg: CoursePackageRecord): String {
+    val n = pkg.cxPaths.sumOf { java.io.File(it).takeIf { f -> f.exists() }?.length() ?: 0L }
+    return when {
+        n >= 1_000_000_000L -> "%.1f GB".format(n / 1_000_000_000.0)
+        n >= 1_000_000L -> "%.0f MB".format(n / 1_000_000.0)
+        n >= 1_000L -> "%.0f KB".format(n / 1_000.0)
+        else -> "$n B"
     }
 }
 

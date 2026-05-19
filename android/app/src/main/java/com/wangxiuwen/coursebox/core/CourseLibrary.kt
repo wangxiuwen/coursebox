@@ -113,6 +113,27 @@ class CourseLibrary private constructor(
 
     fun isLearning(courseId: String): Boolean = courseId in state.learning
 
+    /**
+     * Drop a package from the library and delete the .cx files / staged
+     * lessons.json that backed it. Bytes on disk go away; the library
+     * state's resource_index entries for that id disappear automatically
+     * because the record is removed.
+     */
+    suspend fun removePackage(courseId: String) {
+        val pkg = state.packages.firstOrNull { it.id == courseId } ?: return
+        // Forget pinned / learning state for this id too.
+        stateFlow.value = state.copy(
+            packages = state.packages.filter { it.id != courseId },
+            pinned = state.pinned.filter { it != courseId },
+            learning = state.learning - courseId,
+        )
+        persist()
+        withContext(Dispatchers.IO) {
+            pkg.cxPaths.forEach { runCatching { File(it).delete() } }
+            runCatching { File(pkg.lessonsManifestPath).delete() }
+        }
+    }
+
     suspend fun togglePinned(courseId: String) {
         val current = state.pinned.toMutableList()
         if (current.remove(courseId)) {
