@@ -1,8 +1,12 @@
 package com.wangxiuwen.coursebox.ui.share
 
+import android.os.Build
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -12,13 +16,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import com.wangxiuwen.coursebox.core.CourseLibrary
 import com.wangxiuwen.coursebox.core.lan.CourseShareClient
+import com.wangxiuwen.coursebox.core.lan.DeviceType
+import com.wangxiuwen.coursebox.core.lan.InfoDto
+import com.wangxiuwen.coursebox.core.lan.LocalSend
+import com.wangxiuwen.coursebox.core.lan.LocalSendDiscovery
 import com.wangxiuwen.coursebox.ui.theme.AccentBlue
 import kotlinx.coroutines.launch
 import java.io.File
@@ -26,19 +32,22 @@ import java.io.File
 private val PaperBg = Color(0xFFF5F4F1)
 private val InkSoft = Color(0xFF6B6B66)
 
+/** A peer the discovery loop has surfaced. Keyed by fingerprint so two
+ *  channels (UDP + mDNS) reporting the same device collapse to one row. */
+private data class Peer(
+    val host: String,
+    val port: Int,
+    val info: InfoDto,
+)
+
 /**
- * Sends a course package's .cx files to another coursebox instance over
- * LocalSend v2 (plain HTTP — the peer must have its 局域网导入 page open).
+ * Sends a course package to another coursebox / LocalSend receiver
+ * discovered automatically via UDP multicast + mDNS — no manual IP entry.
  *
- * Flow:
- *   1. user enters peer IP (or scans a QR — TODO)
- *   2. Probe button pings /api/localsend/v2/info to verify the receiver
- *   3. Send button does prepare-upload + per-file upload, streaming
- *      bytes through HttpURLConnection without buffering
- *
- * Multi-part .cx packs send every cxPaths entry; the receiver matches
- * partN filenames against its package's multipart_parts list and merges
- * them under the same course id.
+ * Lifecycle: a [LocalSendDiscovery] is started on Composable enter and
+ * stopped on dispose. Discovered peers stream into a stateMap keyed by
+ * fingerprint, rendered as a list. Tapping a peer kicks off
+ * prepare-upload + per-file streaming via [CourseShareClient].
  */
 @Composable
 fun ShareScreen(library: CourseLibrary, courseId: String, nav: NavHostController) {
@@ -46,14 +55,41 @@ fun ShareScreen(library: CourseLibrary, courseId: String, nav: NavHostController
     val scope = rememberCoroutineScope()
     val pkg = remember(courseId) { library.packageById(courseId) }
 
-    var host by remember { mutableStateOf("") }
-    var probeStatus by remember { mutableStateOf<String?>(null) }
+    val peers = remember { mutableStateMapOf<String, Peer>() }
     var sending by remember { mutableStateOf(false) }
+    var sendingTo by remember { mutableStateOf<String?>(null) }
     var lastResult by remember { mutableStateOf<String?>(null) }
     val progressByFile = remember { mutableStateMapOf<String, Pair<Long, Long>>() }
 
     val cxFiles = pkg?.cxPaths?.map { File(it) }?.filter { it.exists() }.orEmpty()
     val totalBytes = cxFiles.sumOf { it.length() }
+
+    // selfInfo must be stable per-session so the discovery loop's "skip own
+    // fingerprint" check works.
+    val selfInfo = remember {
+        val fp = "share-" + (ctx.packageName + Build.MODEL).hashCode().toUInt().toString(16)
+        InfoDto(
+            alias = "课程盒子 · ${Build.MODEL ?: "Android"}",
+            deviceModel = Build.MODEL,
+            deviceType = DeviceType.Mobile,
+            fingerprint = fp,
+            port = LocalSend.PORT,
+            protocol = "http",
+            download = false,
+        )
+    }
+
+    DisposableEffect(Unit) {
+        val disc = LocalSendDiscovery(
+            ctx = ctx,
+            selfInfo = { selfInfo },
+            onPeer = { host, port, info ->
+                peers[info.fingerprint] = Peer(host, port, info)
+            },
+        )
+        disc.start()
+        onDispose { disc.stop() }
+    }
 
     Box(
         modifier = Modifier
@@ -70,12 +106,7 @@ fun ShareScreen(library: CourseLibrary, courseId: String, nav: NavHostController
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.Black)
                 }
                 Spacer(Modifier.width(4.dp))
-                Text(
-                    "分享课程",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = Color.Black,
-                )
+                Text("分享课程", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color.Black)
             }
 
             Column(
@@ -90,110 +121,84 @@ fun ShareScreen(library: CourseLibrary, courseId: String, nav: NavHostController
                     )
                     if (pkg?.multipartParts?.isNotEmpty() == true) {
                         Text(
-                            "多分片 (${pkg.multipartParts.size} parts) — 接收方会按 part 累加",
+                            "多分片 (${pkg.multipartParts.size} parts) — 对方按 part 累加",
                             color = InkSoft,
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
                 }
 
-                Card(title = "接收方 IP") {
-                    OutlinedTextField(
-                        value = host,
-                        onValueChange = { host = it.trim() },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        placeholder = { Text("例如 192.168.0.122") },
-                    )
-                    Text(
-                        "对方打开「局域网导入」页, 二维码下方就是 IP",
-                        color = InkSoft,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = {
-                                if (host.isBlank()) return@OutlinedButton
-                                probeStatus = "测试中…"
-                                scope.launch {
-                                    val info = CourseShareClient.probe(host)
-                                    probeStatus = info?.let {
-                                        "✓ ${it.alias} (${it.deviceModel ?: it.deviceType.wire})"
-                                    } ?: "✗ 连不上 / 对方没开局域网导入页"
-                                }
-                            },
-                        ) { Text("测试连接") }
-
-                        Button(
-                            onClick = {
-                                if (host.isBlank() || cxFiles.isEmpty() || sending) return@Button
-                                sending = true
-                                lastResult = null
-                                progressByFile.clear()
-                                val specs = cxFiles.map { CourseShareClient.FileSpec(source = it) }
-                                scope.launch {
-                                    val r = CourseShareClient.sendFiles(
-                                        ctx = ctx,
-                                        host = host,
-                                        port = com.wangxiuwen.coursebox.core.lan.LocalSend.PORT,
-                                        files = specs,
-                                    ) { id, sent, total ->
-                                        progressByFile[id] = sent to total
-                                    }
-                                    lastResult = when (r) {
-                                        is CourseShareClient.Result.Ok -> "✓ 已发送 (session ${r.sessionId.take(8)}…)"
-                                        is CourseShareClient.Result.Rejected -> "✗ 拒绝: ${r.message}"
-                                        is CourseShareClient.Result.IoError -> "✗ 网络错: ${r.cause.message}"
-                                    }
-                                    sending = false
-                                }
-                            },
-                            enabled = !sending && host.isNotBlank() && cxFiles.isNotEmpty(),
-                            colors = ButtonDefaults.buttonColors(containerColor = AccentBlue),
-                        ) { Text(if (sending) "发送中…" else "立即发送") }
-                    }
-                    probeStatus?.let {
+                Card(title = "附近设备 (${peers.size})") {
+                    if (peers.isEmpty()) {
                         Text(
-                            it,
-                            color = if (it.startsWith("✓")) Color(0xFF0A7A3F) else InkSoft,
+                            "正在搜索同一 Wi-Fi 下的 coursebox / LocalSend 设备…",
+                            color = InkSoft,
                             style = MaterialTheme.typography.bodySmall,
                         )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            items(peers.values.toList()) { p ->
+                                PeerRow(
+                                    peer = p,
+                                    enabled = !sending && cxFiles.isNotEmpty(),
+                                    isCurrent = sendingTo == p.info.fingerprint,
+                                    onTap = {
+                                        if (sending || cxFiles.isEmpty()) return@PeerRow
+                                        sending = true
+                                        sendingTo = p.info.fingerprint
+                                        lastResult = null
+                                        progressByFile.clear()
+                                        val specs = cxFiles.map { CourseShareClient.FileSpec(source = it) }
+                                        scope.launch {
+                                            val r = CourseShareClient.sendFiles(
+                                                ctx = ctx,
+                                                host = p.host,
+                                                port = p.port,
+                                                files = specs,
+                                            ) { id, sent, total ->
+                                                progressByFile[id] = sent to total
+                                            }
+                                            lastResult = when (r) {
+                                                is CourseShareClient.Result.Ok -> "✓ 已发送到 ${p.info.alias}"
+                                                is CourseShareClient.Result.Rejected -> "✗ ${p.info.alias} 拒绝: ${r.message}"
+                                                is CourseShareClient.Result.IoError -> "✗ 网络错: ${r.cause.message}"
+                                            }
+                                            sending = false
+                                            sendingTo = null
+                                        }
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
 
                 if (sending || progressByFile.isNotEmpty()) {
                     Card(title = "发送进度") {
-                        val sentTotal = progressByFile.values.sumOf { it.first }
-                        val pct = if (totalBytes > 0) (sentTotal * 100 / totalBytes).toInt() else 0
+                        val sent = progressByFile.values.sumOf { it.first }
+                        val pct = if (totalBytes > 0) (sent * 100 / totalBytes).toInt() else 0
                         Text(
-                            "$pct% · ${fmtMb(sentTotal)} / ${fmtMb(totalBytes)} MB",
+                            "$pct% · ${fmtMb(sent)} / ${fmtMb(totalBytes)} MB",
                             style = MaterialTheme.typography.bodyMedium,
                             color = Color.Black,
                         )
                         LinearProgressIndicator(
-                            progress = { sentTotal.toFloat() / totalBytes.coerceAtLeast(1L) },
+                            progress = { sent.toFloat() / totalBytes.coerceAtLeast(1L) },
                             modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                             color = AccentBlue,
                         )
-                        cxFiles.forEach { f ->
-                            val s = progressByFile.entries.firstOrNull { (id, _) ->
-                                specsFor(cxFiles).any { it.source == f && it.id == id }
-                            }?.value
-                            Text(
-                                "${f.name} · ${s?.first?.let { fmtMb(it) } ?: "0"} / ${fmtMb(f.length())} MB",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                ),
-                                color = InkSoft,
-                            )
-                        }
                     }
                 }
 
                 lastResult?.let {
                     Card(title = "结果") {
-                        Text(it, color = if (it.startsWith("✓")) Color(0xFF0A7A3F) else Color(0xFFC93B3B))
+                        Text(
+                            it,
+                            color = if (it.startsWith("✓")) Color(0xFF0A7A3F) else Color(0xFFC93B3B),
+                        )
                     }
                 }
 
@@ -203,11 +208,29 @@ fun ShareScreen(library: CourseLibrary, courseId: String, nav: NavHostController
     }
 }
 
-// Stable spec list (id → file mapping fixed once per send), so the progress
-// map can find which file produced which id.
 @Composable
-private fun specsFor(files: List<File>): List<CourseShareClient.FileSpec> = remember(files) {
-    files.map { CourseShareClient.FileSpec(source = it) }
+private fun PeerRow(peer: Peer, enabled: Boolean, isCurrent: Boolean, onTap: () -> Unit) {
+    val bg = if (isCurrent) AccentBlue.copy(alpha = 0.12f) else Color(0x08000000)
+    Surface(
+        modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onTap),
+        shape = RoundedCornerShape(10.dp),
+        color = bg,
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Text(
+                peer.info.alias.ifBlank { peer.host },
+                color = Color.Black,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "${peer.host}:${peer.port} · ${peer.info.deviceModel ?: peer.info.deviceType.wire}" +
+                    if (isCurrent) " · 传输中…" else "",
+                color = InkSoft,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+    }
 }
 
 @Composable

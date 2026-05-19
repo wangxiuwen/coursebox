@@ -24,6 +24,10 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import com.wangxiuwen.coursebox.core.CourseLibrary
 import com.wangxiuwen.coursebox.core.LanImportServer
+import com.wangxiuwen.coursebox.core.lan.DeviceType
+import com.wangxiuwen.coursebox.core.lan.InfoDto
+import com.wangxiuwen.coursebox.core.lan.LocalSend
+import com.wangxiuwen.coursebox.core.lan.LocalSendDiscovery
 import com.wangxiuwen.coursebox.ui.theme.AccentBlue
 
 private val PaperBg = Color(0xFFF5F4F1)
@@ -75,6 +79,22 @@ fun LanImportScreen(library: CourseLibrary, nav: NavHostController) {
         )
     }
 
+    // Discovery: announce this receiver on UDP multicast 224.0.0.167:53317
+    // and via NSD mDNS so a sender's ShareScreen sees the device in its
+    // peer list without anyone typing an IP.
+    val selfInfo = remember {
+        val fp = "recv-" + (ctx.packageName + android.os.Build.MODEL).hashCode().toUInt().toString(16)
+        InfoDto(
+            alias = "课程盒子 · ${android.os.Build.MODEL ?: "Android"}",
+            deviceModel = android.os.Build.MODEL,
+            deviceType = DeviceType.Mobile,
+            fingerprint = fp,
+            port = LocalSend.PORT,
+            protocol = "http",
+            download = false,
+        )
+    }
+
     DisposableEffect(Unit) {
         runCatching {
             server.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
@@ -87,7 +107,15 @@ fun LanImportScreen(library: CourseLibrary, nav: NavHostController) {
                 serverStatus = "未检测到 Wi-Fi, 请检查网络"
             }
         }.onFailure { serverStatus = "启动失败: ${it.message}" }
-        onDispose { runCatching { server.stop() } }
+
+        // Start announce-only discovery alongside the server.
+        val disc = LocalSendDiscovery(ctx, { selfInfo }) { _, _, _ -> /* receiver doesn't act on incoming announces */ }
+        runCatching { disc.start() }
+
+        onDispose {
+            runCatching { server.stop() }
+            runCatching { disc.stop() }
+        }
     }
 
     Box(
