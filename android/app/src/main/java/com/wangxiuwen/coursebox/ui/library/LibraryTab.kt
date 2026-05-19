@@ -371,7 +371,7 @@ private fun CourseGridCard(
     onClick: () -> Unit,
     onTogglePin: () -> Unit,
 ) {
-    val tone = toneFor(pkg.type)
+    val tone = toneFor(pkg.type, pkg.id)
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -387,6 +387,15 @@ private fun CourseGridCard(
                     .aspectRatio(3f / 4f)
                     .background(tone.gradient),
             ) {
+                // Procedural cover art on top of the tone gradient so two
+                // cards in the same family don't read as identical blue
+                // rectangles. Pattern + secondary palette stops are
+                // derived from pkg.id, so the same course always renders
+                // the same cover.
+                com.wangxiuwen.coursebox.ui.theme.CoverArt(
+                    id = pkg.id,
+                    tone = tone,
+                )
                 // Direct pin toggle on top-right of the cover. No long-press needed.
                 IconButton(
                     onClick = onTogglePin,
