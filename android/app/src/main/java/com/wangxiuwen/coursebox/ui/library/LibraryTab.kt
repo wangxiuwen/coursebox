@@ -29,6 +29,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -389,6 +390,10 @@ private fun CourseGridCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(3f / 4f)
+                    // Clip strictly to the cover bounds — the 110sp poker
+                    // glyph and the CoverArt patterns must NOT spill onto
+                    // the title row that sits below this Box.
+                    .clipToBounds()
                     .background(tone.gradient),
             ) {
                 // Procedural cover art on top of the tone gradient so two
@@ -400,13 +405,12 @@ private fun CourseGridCard(
                     id = pkg.id,
                     tone = tone,
                 )
-                // Playing-card chrome: oversized faint suit-glyph in the
-                // middle + small rank label at the top-left and rotated
-                // copy at the bottom-right. The glyph is picked by id
-                // hash so each card reads as its own face card.
+                // Playing-card centre glyph (♠/♥/♦/♣/★/✦/✧/❖, picked by id
+                // hash) — no corner ranks. Lives inside the cover Box's
+                // bounds; clipping below keeps the glyph + CoverArt from
+                // bleeding onto the title row.
                 val glyphs = listOf("♠", "♥", "♦", "♣", "★", "✦", "✧", "❖")
                 val glyph = glyphs[Math.floorMod(pkg.id.hashCode(), glyphs.size)]
-                val rank = pkg.lessonIndex.size.coerceAtMost(99).toString()
                 Text(
                     glyph,
                     color = Color.White.copy(alpha = 0.20f),
@@ -414,25 +418,6 @@ private fun CourseGridCard(
                     fontWeight = FontWeight.Black,
                     modifier = Modifier.align(Alignment.Center),
                 )
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(start = 10.dp, top = 8.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(rank, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Black, lineHeight = 16.sp)
-                    Text(glyph, color = Color.White.copy(alpha = 0.9f), fontSize = 14.sp, fontWeight = FontWeight.Black, lineHeight = 14.sp)
-                }
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(end = 10.dp, bottom = 8.dp)
-                        .graphicsLayer { rotationZ = 180f },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(rank, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Black, lineHeight = 16.sp)
-                    Text(glyph, color = Color.White.copy(alpha = 0.9f), fontSize = 14.sp, fontWeight = FontWeight.Black, lineHeight = 14.sp)
-                }
                 // Direct pin toggle on top-right of the cover. No long-press needed.
                 IconButton(
                     onClick = onTogglePin,
@@ -460,7 +445,7 @@ private fun CourseGridCard(
                         .padding(start = 10.dp, bottom = 10.dp),
                 ) {
                     Text(
-                        "${pkg.lessonIndex.size} 课次",
+                        "${pkg.lessonIndex.size} 课",
                         color = Color.White,
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
