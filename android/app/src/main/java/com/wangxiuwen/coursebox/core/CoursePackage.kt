@@ -88,22 +88,13 @@ data class CoursePackageRecord(
     val metadata: Map<String, JsonElement> = emptyMap(),
     @SerialName("lessons_manifest_path") val lessonsManifestPath: String,
     @SerialName("lesson_index") val lessonIndex: List<LessonIndexEntry> = emptyList(),
-    /**
-     * sha256 → cx:// URI (new no-extract path) OR absolute file path
-     * (legacy extracted import). Players & resolvers must accept both
-     * shapes — anything starting with "cx:" goes through CxDataSource,
-     * anything else is a plain file path.
-     */
+    /** sha256 → `cx://` URI into the backing .cx (or one of its .partN). */
     @SerialName("resource_index") val resourceIndex: Map<String, String> = emptyMap(),
     @SerialName("logical_path_index") val logicalPathIndex: Map<String, String> = emptyMap(),
     @SerialName("imported_at") val importedAt: String = "",
     val source: String = "",
-    /** Absolute path of the *first* backing .cx file (or the only one for
-     *  single-part packs). Kept for back-compat with v1 records; new code
-     *  should read [cxPaths]. Null for legacy extracted imports. */
-    @SerialName("cx_path") val cxPath: String? = null,
-    /** Every .cx file backing this record. For multi-part packs the list
-     *  grows as each partN is imported. Single-part packs have one entry. */
+    /** Every .cx file backing this record. Single-part packs have one
+     *  entry; multi-part packs grow this list as each partN is imported. */
     @SerialName("cx_paths") val cxPaths: List<String> = emptyList(),
     /** Filenames of the parts the packager declared up-front (from
      *  manifest.multipart_parts). Empty for single-part packs. Used at

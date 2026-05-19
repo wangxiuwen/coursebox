@@ -61,11 +61,17 @@ class CourseLibrary private constructor(
         return state.packages.filter { it.type in set }
     }
 
+    /**
+     * Every resource_index entry is now a `cx://` URI pointing into a .cx
+     * archive. The lookup just confirms the owning package's backing
+     * file(s) still exist — no filesystem-path branch, no legacy extracted
+     * objects/ to walk.
+     */
     fun resolveHash(hash: String): String? {
         val norm = if (hash.startsWith("sha256:")) hash else "sha256:$hash"
         for (pkg in state.packages) {
-            val path = pkg.resourceIndex[norm]
-            if (path != null && isUsable(path)) return path
+            val path = pkg.resourceIndex[norm] ?: continue
+            if (pkg.cxPaths.any { File(it).exists() }) return path
         }
         return null
     }
@@ -73,22 +79,10 @@ class CourseLibrary private constructor(
     fun resolveLogicalPath(logical: String): String? {
         val norm = normalizeLogicalPath(logical)
         for (pkg in state.packages) {
-            val path = pkg.logicalPathIndex[norm]
-            if (path != null && isUsable(path)) return path
+            val path = pkg.logicalPathIndex[norm] ?: continue
+            if (pkg.cxPaths.any { File(it).exists() }) return path
         }
         return null
-    }
-
-    /** A "resource path" from the index is either a `cx://` URI (the no-extract
-     *  path — validated at lookup time only by checking the backing .cx file
-     *  still exists) or an absolute filesystem path (legacy extracted import). */
-    private fun isUsable(path: String): Boolean {
-        if (path.startsWith("cx:")) {
-            // Find the backing .cx via the owning package record. Cheap —
-            // there are only a handful of packages.
-            return state.packages.any { it.cxPath?.let { File(it).exists() } == true }
-        }
-        return File(path).exists()
     }
 
     fun resolve(hash: String? = null, logicalPath: String? = null): String? {
@@ -222,7 +216,6 @@ class CourseLibrary private constructor(
                 logicalPathIndex = logicalIndex,
                 importedAt = now,
                 source = "cx:$sourceLabel",
-                cxPath = cxFile.absolutePath,
                 cxPaths = listOf(cxFile.absolutePath),
                 multipartParts = manifest.multipartParts,
             )
@@ -316,16 +309,6 @@ class CourseLibrary private constructor(
             normalizeLogicalPath(r.origin) to
                 com.wangxiuwen.coursebox.core.cx.CxDataSource.makeUri(cxFile, entry.name).toString()
         }
-
-    private fun buildResourceIndex(resources: List<CourseResource>): Map<String, String> =
-        resources.associate { r ->
-            val key = if (r.hash.startsWith("sha256:")) r.hash else "sha256:${r.hash}"
-            key to File(root, r.path).absolutePath
-        }
-
-    private fun buildLogicalIndex(resources: List<CourseResource>): Map<String, String> =
-        resources.filter { it.origin.isNotBlank() }
-            .associate { normalizeLogicalPath(it.origin) to File(root, it.path).absolutePath }
 
     private suspend fun persist() = withContext(Dispatchers.IO) {
         root.mkdirs()
