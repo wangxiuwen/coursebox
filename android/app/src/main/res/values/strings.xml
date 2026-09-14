@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">课程盒子</string>
+    <string name="kiosk_released">已退出全屏锁定，可以返回桌面</string>
 </resources>
