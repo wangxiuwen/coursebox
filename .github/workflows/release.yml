@@ -38,14 +38,22 @@ jobs:
           printf '%s' "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
           ls -la ~/.android/debug.keystore
           sha256sum ~/.android/debug.keystore
-      - name: Build APK
+      - name: Build APKs
         working-directory: android
-        run: ./gradlew :app:assembleRelease
-      - name: Rename APK
+        run: ./gradlew :app:assembleNormalRelease :app:assembleKioskRelease
+      - name: Rename APKs
         run: |
           mkdir -p out
-          cp android/app/build/outputs/apk/release/app-release.apk \
+          # Asset names are load-bearing: UpdateChecker picks the asset whose
+          # name carries its own flavour tag, so a kiosk tablet never pulls
+          # the normal apk (which would strand device ownership on a receiver
+          # it does not ship). Keep "kiosk" in the kiosk name and out of the
+          # normal one.
+          cp android/app/build/outputs/apk/normal/release/app-normal-release.apk \
              out/coursebox-android-${{ github.ref_name }}.apk
+          cp android/app/build/outputs/apk/kiosk/release/app-kiosk-release.apk \
+             out/coursebox-android-kiosk-${{ github.ref_name }}.apk
+          ls -la out/
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk

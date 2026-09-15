@@ -15,7 +15,7 @@ android {
         targetSdk = 34
         // Stable semver name — must match GitHub release tags (vX.Y.Z) so the
         // in-app update checker can compare. Bump on every release.
-        versionName = "0.10.32"
+        versionName = "0.10.33"
         // Monotonic versionCode from epoch-2024 so reinstall always advances
         // even between semver bumps.
         versionCode = ((System.currentTimeMillis() - 1704067200_000L) / 1000)
@@ -35,10 +35,16 @@ android {
     productFlavors {
         create("normal") {
             dimension = "mode"
+            // Which release asset this build may update itself to. A kiosk
+            // device that swallowed the normal apk would strand device
+            // ownership on a receiver that apk does not contain, and nothing
+            // short of a factory reset could clear it.
+            buildConfigField("String", "UPDATE_ASSET_TAG", "\"\"")
         }
         create("kiosk") {
             dimension = "mode"
             versionNameSuffix = "-kiosk"
+            buildConfigField("String", "UPDATE_ASSET_TAG", "\"kiosk\"")
         }
     }
 

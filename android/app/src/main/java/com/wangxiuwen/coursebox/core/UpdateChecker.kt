@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.util.Log
 import androidx.core.content.FileProvider
+import com.wangxiuwen.coursebox.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -52,13 +53,31 @@ object UpdateChecker {
      * release, no matching asset, parse error) — silent so the UI can just
      * skip prompting.
      */
+    /**
+     * A release carries one apk per flavour, so "the first apk" is not good
+     * enough: a kiosk tablet that installed the normal apk would be left with
+     * device ownership recorded against a receiver that apk does not ship,
+     * unclearable short of a factory reset. Each build therefore takes only
+     * the asset carrying its own tag, and the untagged normal build refuses
+     * anything that looks like a kiosk asset.
+     */
+    private fun isOurFlavour(assetName: String): Boolean {
+        val tag = BuildConfig.UPDATE_ASSET_TAG
+        return if (tag.isEmpty()) {
+            !assetName.contains("kiosk", ignoreCase = true)
+        } else {
+            assetName.contains(tag, ignoreCase = true)
+        }
+    }
+
     suspend fun check(currentVersion: String): UpdateAvailable? = withContext(Dispatchers.IO) {
         val release = fetchLatest() ?: return@withContext null
         if (release.prerelease || release.draft) return@withContext null
 
         val apkAsset = release.assets.firstOrNull {
             it.name.endsWith(".apk", ignoreCase = true) &&
-                !it.name.contains("unsigned", ignoreCase = true)
+                !it.name.contains("unsigned", ignoreCase = true) &&
+                isOurFlavour(it.name)
         } ?: return@withContext null
 
         if (!isNewer(currentVersion, release.tag_name)) return@withContext null
