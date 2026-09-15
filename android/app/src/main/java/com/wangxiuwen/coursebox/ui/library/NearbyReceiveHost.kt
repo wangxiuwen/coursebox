@@ -46,6 +46,15 @@ class NearbyReceiveHost(
             onEvent = { event ->
                 post {
                     when (event) {
+                        is LanImportServer.Event.Receiving -> {
+                            val pct = if (event.total > 0) {
+                                (event.received * 100 / event.total).toInt()
+                            } else 0
+                            val line = "接收中 $pct% · " +
+                                "${mb(event.received)} / ${mb(event.total)} MB"
+                            updateRow(event.filename, "receiving", line)
+                            status.value = line
+                        }
                         is LanImportServer.Event.Started -> {
                             rows.removeAll { it.name == event.filename }
                             rows.add(0, FileRow(event.filename, "pending", "接收完成，正在导入…"))
@@ -118,6 +127,8 @@ class NearbyReceiveHost(
         callback?.invoke(accepted)
         status.value = if (accepted) "已同意，等待对方传输…" else "已拒绝本次传输"
     }
+
+    private fun mb(bytes: Long): String = "%.1f".format(bytes / 1024.0 / 1024.0)
 
     private fun updateRow(name: String, state: String, message: String) {
         val index = rows.indexOfFirst { it.name == name }

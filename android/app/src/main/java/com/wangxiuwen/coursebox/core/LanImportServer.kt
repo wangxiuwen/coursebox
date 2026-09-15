@@ -25,6 +25,10 @@ import java.util.concurrent.TimeUnit
 private const val TAG = "LanImportServer"
 private const val SERVER_PORT = 38723
 
+/** Throttle for receive-progress events; fast enough to look live, slow
+ *  enough not to flood the main thread during a multi-GB transfer. */
+private const val PROGRESS_INTERVAL_MS = 500L
+
 /**
  * One-shot HTTP receiver for `.coursebox.zip` files. Hosts a minimal upload
  * page on the phone's LAN IP so any browser on the same Wi-Fi (or another
@@ -63,6 +67,18 @@ class LanImportServer(
      * [Event]s.
      */
     sealed class Event {
+        /**
+         * Bytes landing, throttled to ~2/s. Emitted from the moment the
+         * transfer opens: [Started] only fires once the file is fully
+         * received, so without this a multi-GB push showed nothing at all on
+         * the receiving screen until it was over.
+         */
+        data class Receiving(
+            val filename: String,
+            val received: Long,
+            val total: Long,
+        ) : Event()
+
         data class Started(val filename: String) : Event()
         data class Done(val filename: String, val message: String) : Event()
         data class Failed(val filename: String, val message: String) : Event()
@@ -486,7 +502,10 @@ class LanImportServer(
             )
             val buf = ByteArray(64 * 1024)
             var remaining = total
+            var received = 0L
+            var lastReport = 0L
             val input = session.inputStream
+            onEvent(Event.Receiving(name, 0, total))
             out.outputStream().use { sink ->
                 while (remaining > 0) {
                     val toRead = if (remaining < buf.size) remaining.toInt() else buf.size
@@ -494,6 +513,12 @@ class LanImportServer(
                     if (n < 0) break
                     sink.write(buf, 0, n)
                     remaining -= n
+                    received += n
+                    val now = System.currentTimeMillis()
+                    if (now - lastReport >= PROGRESS_INTERVAL_MS) {
+                        lastReport = now
+                        onEvent(Event.Receiving(name, received, total))
+                    }
                 }
             }
             if (remaining > 0) {
