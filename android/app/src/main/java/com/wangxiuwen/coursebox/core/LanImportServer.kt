@@ -554,14 +554,40 @@ class LanImportServer(
 
     companion object {
         /** First non-loopback IPv4 of any "up" interface — typically wlan0. */
-        fun localIpv4(): String? = runCatching {
-            NetworkInterface.getNetworkInterfaces().toList()
-                .filter { it.isUp && !it.isLoopback }
-                .flatMap { it.inetAddresses.toList() }
-                .filterIsInstance<Inet4Address>()
-                .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
-                ?.hostAddress
-        }.getOrNull()
+        /**
+         * The device's LAN address, or null when genuinely offline.
+         *
+         * Guarded per interface rather than in one outer runCatching: on
+         * Android 11 querying some virtual interface throws, and wrapping the
+         * whole chain meant a single bad entry produced null even with wifi
+         * up and addressed — the screen then claimed there was no LAN while
+         * the upload server was happily serving on :38723.
+         *
+         * Wi-Fi first: a device tethering over usb0/rndis has a second
+         * address that is useless in a QR code meant for the local network.
+         */
+        fun localIpv4(): String? {
+            val interfaces = runCatching {
+                NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+            }.getOrDefault(emptyList())
+            return interfaces
+                .filter { runCatching { it.isUp && !it.isLoopback }.getOrDefault(false) }
+                .sortedBy { nic ->
+                    val name = nic.name.lowercase()
+                    if (name.startsWith("wlan") || name.startsWith("swlan") ||
+                        name.startsWith("ap") || name.startsWith("eth")
+                    ) 0 else 1
+                }
+                .firstNotNullOfOrNull { nic ->
+                    runCatching {
+                        nic.inetAddresses.toList()
+                            .filterIsInstance<Inet4Address>()
+                            .firstOrNull {
+                                !it.isLoopbackAddress && !it.isLinkLocalAddress
+                            }?.hostAddress
+                    }.getOrNull()
+                }
+        }
 
         fun url(): String? = localIpv4()?.let { "http://$it:$SERVER_PORT" }
 

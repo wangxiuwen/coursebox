@@ -94,15 +94,26 @@ class AppShareServer private constructor(
 
         internal fun forTest(apk: File, versionName: String) = AppShareServer(apk, versionName)
 
-        /** Prefer Wi-Fi/hotspot interfaces over mobile-data interfaces. */
+        /**
+         * Prefer Wi-Fi/hotspot interfaces over mobile-data interfaces.
+         *
+         * Each interface is probed inside its own runCatching: on Android 11
+         * a single throwing virtual interface used to take the whole
+         * enumeration down and report "no network" on a device that was
+         * online. Same failure as [LanImportServer.localIpv4].
+         */
         fun localIpv4(): String? = runCatching {
-            val interfaces = NetworkInterface.getNetworkInterfaces().toList()
-                .filter { it.isUp && !it.isLoopback }
+            val interfaces = runCatching {
+                NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+            }.getOrDefault(emptyList())
+                .filter { runCatching { it.isUp && !it.isLoopback }.getOrDefault(false) }
             val candidates = interfaces.flatMap { nic ->
-                nic.inetAddresses.toList()
-                    .filterIsInstance<Inet4Address>()
-                    .filter { !it.isLoopbackAddress && !it.isLinkLocalAddress }
-                    .map { nic.name.lowercase() to it }
+                runCatching {
+                    nic.inetAddresses.toList()
+                        .filterIsInstance<Inet4Address>()
+                        .filter { !it.isLoopbackAddress && !it.isLinkLocalAddress }
+                        .map { nic.name.lowercase() to it }
+                }.getOrDefault(emptyList())
             }
             candidates
                 .sortedBy { (name, _) ->
