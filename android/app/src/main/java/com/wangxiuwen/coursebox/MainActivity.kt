@@ -21,10 +21,16 @@ import com.wangxiuwen.coursebox.ui.RootScreen
 import com.wangxiuwen.coursebox.ui.theme.ParrotTheme
 import kotlinx.coroutines.launch
 
+private const val DEAD_BACK_COUNT = 3
+private const val DEAD_BACK_WINDOW_MS = 2_000L
+
 class MainActivity : ComponentActivity() {
 
     /** Timestamps of recent volume-down presses (the escape-hatch gesture). */
     private val adminTaps = ArrayDeque<Long>()
+
+    /** Same idea for back presses that the nav graph refused. */
+    private val deadBackPresses = ArrayDeque<Long>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,7 +45,16 @@ class MainActivity : ComponentActivity() {
                 if (!KioskController.isActive()) {
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
+                    return
                 }
+                // This only runs when the nav graph could not handle back
+                // (its own handler is registered later, so it goes first).
+                // Swallowing outright is what left a screen that failed to
+                // render completely inescapable: back does nothing, there
+                // is no launcher to fall back on, and the player chrome is
+                // the only thing still drawn. Repeated presses rebuild the
+                // activity, which lands back on the library.
+                registerBackPress()
             }
         })
 
@@ -79,6 +94,24 @@ class MainActivity : ComponentActivity() {
             registerAdminTap()
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    /**
+     * Rebuild the activity after [DEAD_BACK_COUNT] back presses that went
+     * nowhere — the self-rescue for a screen stuck with nothing drawn.
+     */
+    private fun registerBackPress() {
+        val now = System.currentTimeMillis()
+        while (deadBackPresses.isNotEmpty() &&
+            now - deadBackPresses.first() > DEAD_BACK_WINDOW_MS
+        ) {
+            deadBackPresses.removeFirst()
+        }
+        deadBackPresses.addLast(now)
+        if (deadBackPresses.size >= DEAD_BACK_COUNT) {
+            deadBackPresses.clear()
+            recreate()
+        }
     }
 
     /** [KioskController.ADMIN_TAP_COUNT] presses in a row leave kiosk. */

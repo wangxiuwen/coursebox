@@ -153,10 +153,18 @@ object KioskController {
     }
 
     fun applyRotationLock(activity: Activity) {
-        activity.requestedOrientation = if (isRotationLocked(activity)) {
+        val desired = if (isRotationLocked(activity)) {
             ActivityInfo.SCREEN_ORIENTATION_LOCKED
         } else {
             ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+        // Only write when it differs. Assigning requestedOrientation on
+        // every onCreate can push the activity through a configuration
+        // change even when nothing changed, and a relaunch mid-restore is
+        // a good way to end up with a navigation state that renders
+        // nothing.
+        if (activity.requestedOrientation != desired) {
+            activity.requestedOrientation = desired
         }
     }
 
