@@ -5,7 +5,9 @@ import android.app.ActivityManager
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.os.Build
+import android.os.UserManager
 import android.provider.Settings
 import android.util.Log
 import android.view.WindowManager
@@ -36,6 +38,22 @@ object KioskController {
     private const val TAG = "Kiosk"
     const val ADMIN_TAP_COUNT = 7
     const val ADMIN_TAP_WINDOW_MS = 3_000L
+    private const val SETTINGS_PACKAGE = "com.android.settings"
+
+    /**
+     * Applied while we are device owner. Settings has to stay reachable so
+     * the device can be moved to another wifi network, which means the
+     * destructive corners of it need closing off. Debugging is deliberately
+     * NOT restricted — adb is how the device gets serviced.
+     */
+    private val GUARD_RESTRICTIONS = listOf(
+        UserManager.DISALLOW_FACTORY_RESET,
+        UserManager.DISALLOW_SAFE_BOOT,
+        UserManager.DISALLOW_ADD_USER,
+        UserManager.DISALLOW_UNINSTALL_APPS,
+        UserManager.DISALLOW_MODIFY_ACCOUNTS,
+        UserManager.DISALLOW_CONFIG_CREDENTIALS,
+    )
 
     private fun dpm(ctx: Context) =
         ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
@@ -76,7 +94,7 @@ object KioskController {
             // Whitelist ourselves first, else startLockTask still prompts.
             runCatching {
                 dpm(activity).setLockTaskPackages(
-                    admin(activity), arrayOf(activity.packageName),
+                    admin(activity), arrayOf(activity.packageName, SETTINGS_PACKAGE),
                 )
             }.onFailure { Log.w(TAG, "setLockTaskPackages failed", it) }
         }
@@ -102,8 +120,16 @@ object KioskController {
         runCatching { activity.stopLockTask() }
             .onFailure { Log.w(TAG, "stopLockTask failed", it) }
         if (isDeviceOwner(activity)) {
+            val dpm = dpm(activity)
+            val admin = admin(activity)
+            runCatching { dpm.setUninstallBlocked(admin, activity.packageName, false) }
+                .onFailure { Log.w(TAG, "uninstall unblock failed", it) }
+            for (restriction in GUARD_RESTRICTIONS) {
+                runCatching { dpm.clearUserRestriction(admin, restriction) }
+                    .onFailure { Log.w(TAG, "clear $restriction failed", it) }
+            }
             @Suppress("DEPRECATION")
-            runCatching { dpm(activity).clearDeviceOwnerApp(activity.packageName) }
+            runCatching { dpm.clearDeviceOwnerApp(activity.packageName) }
                 .onFailure { Log.w(TAG, "clearDeviceOwnerApp failed", it) }
         }
         WindowInsetsControllerCompat(activity.window, activity.window.decorView)
@@ -127,10 +153,48 @@ object KioskController {
             )
         }.onFailure { Log.w(TAG, "stay-on policy failed", it) }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            // NONE = no home, no recents, no notifications, no global actions.
+            // Home and recents stay off — those are the ways out. Global
+            // actions stay on so the long-press power menu can still shut the
+            // device down, and system info so the clock and the wifi/battery
+            // icons are readable when a panel pulls the status bar up.
             runCatching {
-                dpm.setLockTaskFeatures(admin, DevicePolicyManager.LOCK_TASK_FEATURE_NONE)
+                dpm.setLockTaskFeatures(
+                    admin,
+                    DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS or
+                        DevicePolicyManager.LOCK_TASK_FEATURE_SYSTEM_INFO,
+                )
             }.onFailure { Log.w(TAG, "lock task features failed", it) }
+        }
+        // Settings is reachable (see [openNetworkSettings]), so fence off the
+        // parts of it that would undo the kiosk or wipe the device.
+        for (restriction in GUARD_RESTRICTIONS) {
+            runCatching { dpm.addUserRestriction(admin, restriction) }
+                .onFailure { Log.w(TAG, "restriction $restriction failed", it) }
+        }
+        runCatching { dpm.setUninstallBlocked(admin, ctx.packageName, true) }
+            .onFailure { Log.w(TAG, "uninstall block failed", it) }
+    }
+
+    /**
+     * Opens the system network panel — a floating sheet that only does wifi,
+     * not the full Settings tree. Needed because a kiosk device that moves to
+     * a new room has no other way to get back online.
+     *
+     * Works because [SETTINGS_PACKAGE] is on the lock-task whitelist; without
+     * that, starting it from lock task fails silently.
+     */
+    fun openNetworkSettings(activity: Activity) {
+        val intents = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add(Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY))
+            }
+            add(Intent(Settings.ACTION_WIFI_SETTINGS))
+        }
+        for (intent in intents) {
+            val started = runCatching { activity.startActivity(intent); true }
+                .onFailure { Log.w(TAG, "network settings failed: $intent", it) }
+                .getOrDefault(false)
+            if (started) return
         }
     }
 

@@ -61,9 +61,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        // Belt and braces for non-device-owner installs where HOME can still
-        // background us: come straight back to the front.
-        if (kioskEnabled) {
+        // Last-resort bounce back, ONLY when lock task never took hold. While
+        // lock task is running the system already blocks every exit, and
+        // bouncing here would also slam the door on screens we open on
+        // purpose — the wifi panel and the file picker used to import a
+        // course both leave the activity and would be thrown straight out.
+        if (kioskEnabled && !KioskController.isLockTaskActive(this)) {
             startActivity(intent)
         }
     }
