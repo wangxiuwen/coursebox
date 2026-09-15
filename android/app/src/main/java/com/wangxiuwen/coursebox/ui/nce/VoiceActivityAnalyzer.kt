@@ -49,13 +49,11 @@ class VoiceActivityAnalyzer(private val context: Context) {
             if (cache.isFile) json.decodeFromString<List<SpeechSegment>>(cache.readText()) else null
         }.getOrNull()?.takeIf { it.isNotEmpty() }?.let { return@withContext it }
 
-        val pcm = decodeMono(mediaPath, checkActive)
-        if (pcm.samples.isEmpty()) return@withContext emptyList()
-        val mono16k = resample(pcm.samples, pcm.sampleRate, MODEL_SAMPLE_RATE)
-        val probabilities = infer(mono16k, checkActive)
+        val analysis = decodeAndInfer(mediaPath, checkActive)
+        if (analysis.probabilities.isEmpty()) return@withContext emptyList()
         val segments = VadPostProcessor.toSegments(
-            probabilities = probabilities,
-            audioDurationMs = mono16k.size * 1000L / MODEL_SAMPLE_RATE,
+            probabilities = analysis.probabilities,
+            audioDurationMs = analysis.durationMs,
         )
         if (segments.isNotEmpty()) {
             cacheDir.mkdirs()
@@ -64,9 +62,21 @@ class VoiceActivityAnalyzer(private val context: Context) {
         segments
     }
 
-    private data class DecodedPcm(val samples: FloatArray, val sampleRate: Int)
+    private class Analysis(val probabilities: FloatArray, val durationMs: Long)
 
-    private fun decodeMono(mediaPath: String, checkActive: () -> Unit): DecodedPcm {
+    /**
+     * Decode, resample and run the VAD in one streaming pass.
+     *
+     * Holding the whole track in memory is what this avoids: at
+     * [MAX_ANALYSIS_SECONDS] and 44.1 kHz the mono float array alone is
+     * ~317 MB, before the doubling inside [FloatCollector] and the copy out
+     * of it — hopeless against the 128 MB heap cap on a 32-bit learning
+     * tablet, and uncomfortable even on a 64-bit phone. Silero is already
+     * frame-by-frame (512 samples, carrying state), so samples can be fed
+     * through as they are decoded and dropped immediately after. What
+     * survives the pass is one float of probability per 32 ms of audio.
+     */
+    private fun decodeAndInfer(mediaPath: String, checkActive: () -> Unit): Analysis {
         val extractor = MediaExtractor()
         var pfd: ParcelFileDescriptor? = null
         try {
@@ -100,7 +110,9 @@ class VoiceActivityAnalyzer(private val context: Context) {
             try {
                 codec.configure(inputFormat, null, null, 0)
                 codec.start()
-                return drainDecoder(codec, extractor, inputFormat, checkActive)
+                return VadRunner(checkActive).use { vad ->
+                    drainDecoder(codec, extractor, inputFormat, checkActive, vad)
+                }
             } finally {
                 runCatching { codec.stop() }
                 codec.release()
@@ -116,16 +128,17 @@ class VoiceActivityAnalyzer(private val context: Context) {
         extractor: MediaExtractor,
         initialFormat: MediaFormat,
         checkActive: () -> Unit,
-    ): DecodedPcm {
+        vad: VadRunner,
+    ): Analysis {
         var sampleRate = initialFormat.intOr(MediaFormat.KEY_SAMPLE_RATE, MODEL_SAMPLE_RATE)
         var channels = initialFormat.intOr(MediaFormat.KEY_CHANNEL_COUNT, 1)
         var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
-        val out = FloatCollector(sampleRate * 60)
+        val out = Resampler(sampleRate, MODEL_SAMPLE_RATE) { vad.push(it) }
         val info = MediaCodec.BufferInfo()
         var inputEnded = false
         var outputEnded = false
 
-        while (!outputEnded && out.size < sampleRate * MAX_ANALYSIS_SECONDS) {
+        while (!outputEnded && out.inputCount < sampleRate.toLong() * MAX_ANALYSIS_SECONDS) {
             checkActive()
             if (!inputEnded) {
                 val index = codec.dequeueInputBuffer(CODEC_TIMEOUT_US)
@@ -149,6 +162,9 @@ class VoiceActivityAnalyzer(private val context: Context) {
                     sampleRate = f.intOr(MediaFormat.KEY_SAMPLE_RATE, sampleRate)
                     channels = f.intOr(MediaFormat.KEY_CHANNEL_COUNT, channels).coerceAtLeast(1)
                     pcmEncoding = f.intOr(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+                    // Arrives before any output buffer in practice, so the
+                    // ratio is settled before a single sample is pushed.
+                    out.sourceRate = sampleRate
                 }
                 MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
                 else -> if (index >= 0) {
@@ -164,95 +180,160 @@ class VoiceActivityAnalyzer(private val context: Context) {
                 }
             }
         }
-        return DecodedPcm(out.toArray(), sampleRate)
+        out.finish()
+        val probabilities = vad.finish()
+        return Analysis(
+            probabilities = probabilities,
+            durationMs = out.outputCount * 1000L / MODEL_SAMPLE_RATE,
+        )
     }
 
     private fun appendPcm(
         buffer: ByteBuffer,
         channels: Int,
         encoding: Int,
-        out: FloatCollector,
+        out: Resampler,
     ) {
         if (encoding == AudioFormat.ENCODING_PCM_FLOAT) {
             val floats = buffer.asFloatBuffer()
             while (floats.remaining() >= channels) {
                 var sum = 0f
                 repeat(channels) { sum += floats.get() }
-                out.add((sum / channels).coerceIn(-1f, 1f))
+                out.push((sum / channels).coerceIn(-1f, 1f))
             }
         } else {
             val shorts = buffer.asShortBuffer()
             while (shorts.remaining() >= channels) {
                 var sum = 0f
                 repeat(channels) { sum += shorts.get() / 32768f }
-                out.add((sum / channels).coerceIn(-1f, 1f))
+                out.push((sum / channels).coerceIn(-1f, 1f))
             }
         }
     }
 
-    private fun infer(samples: FloatArray, checkActive: () -> Unit): FloatArray {
-        val frameCount = ceil(samples.size / FRAME_SAMPLES.toDouble()).toInt()
-        val probabilities = FloatArray(frameCount)
-        val env = OrtEnvironment.getEnvironment()
-        val options = OrtSession.SessionOptions().apply { setIntraOpNumThreads(1) }
-        context.assets.open(MODEL_ASSET).use { model ->
-            env.createSession(model.readBytes(), options).use { session ->
-                var state = FloatArray(2 * 1 * 128)
-                var contextSamples = FloatArray(CONTEXT_SAMPLES)
-                OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(MODEL_SAMPLE_RATE.toLong())), longArrayOf()).use { sr ->
-                    repeat(frameCount) { frameIndex ->
-                        if (frameIndex % 32 == 0) checkActive()
-                        val frame = FloatArray(FRAME_SAMPLES)
-                        val from = frameIndex * FRAME_SAMPLES
-                        val count = minOf(FRAME_SAMPLES, samples.size - from)
-                        if (count > 0) samples.copyInto(frame, 0, from, from + count)
-                        // Silero's public ONNX graph expects the previous
-                        // 64 samples prepended to each 512-sample frame.
-                        // Its Python wrapper performs this concatenation;
-                        // mobile callers must do it explicitly as well.
-                        val modelInput = FloatArray(CONTEXT_SAMPLES + FRAME_SAMPLES)
-                        contextSamples.copyInto(modelInput, 0)
-                        frame.copyInto(modelInput, CONTEXT_SAMPLES)
-                        OnnxTensor.createTensor(
-                            env,
-                            FloatBuffer.wrap(modelInput),
-                            longArrayOf(1, modelInput.size.toLong()),
-                        ).use { input ->
-                            OnnxTensor.createTensor(env, FloatBuffer.wrap(state), longArrayOf(2, 1, 128)).use { stateTensor ->
-                                session.run(mapOf("input" to input, "state" to stateTensor, "sr" to sr)).use { result ->
-                                    @Suppress("UNCHECKED_CAST")
-                                    val output = result[0].value as Array<FloatArray>
-                                    probabilities[frameIndex] = output[0][0]
-                                    @Suppress("UNCHECKED_CAST")
-                                    val next = result[1].value as Array<Array<FloatArray>>
-                                    state = FloatArray(256).also { flattened ->
-                                        var p = 0
-                                        next.forEach { batch -> batch.forEach { row -> row.forEach { flattened[p++] = it } } }
-                                    }
-                                    contextSamples = frame.copyOfRange(
-                                        FRAME_SAMPLES - CONTEXT_SAMPLES,
-                                        FRAME_SAMPLES,
-                                    )
-                                }
-                            }
+    /**
+     * Silero VAD driven one frame at a time. Owns the ORT session so the
+     * model is loaded once per analysis, and keeps the recurrent state and
+     * the 64-sample context between frames — which is what lets samples be
+     * consumed as they decode instead of after the whole track is in memory.
+     */
+    private inner class VadRunner(private val checkActive: () -> Unit) : AutoCloseable {
+        private val env = OrtEnvironment.getEnvironment()
+        private val options = OrtSession.SessionOptions().apply { setIntraOpNumThreads(1) }
+        private val session = context.assets.open(MODEL_ASSET)
+            .use { model -> env.createSession(model.readBytes(), options) }
+        private val srTensor = OnnxTensor.createTensor(
+            env,
+            LongBuffer.wrap(longArrayOf(MODEL_SAMPLE_RATE.toLong())),
+            longArrayOf(),
+        )
+
+        private var state = FloatArray(2 * 1 * 128)
+        private var contextSamples = FloatArray(CONTEXT_SAMPLES)
+        private val frame = FloatArray(FRAME_SAMPLES)
+        private var fill = 0
+        private var framesRun = 0
+        private val probabilities = FloatCollector(1024)
+
+        fun push(sample: Float) {
+            frame[fill++] = sample
+            if (fill == FRAME_SAMPLES) runFrame()
+        }
+
+        /**
+         * Zero-pad and run whatever is left, so a track that does not divide
+         * evenly still reports a probability for its final partial frame —
+         * the ceil() the array version used to do.
+         */
+        fun finish(): FloatArray {
+            if (fill > 0) {
+                java.util.Arrays.fill(frame, fill, FRAME_SAMPLES, 0f)
+                runFrame()
+            }
+            return probabilities.toArray()
+        }
+
+        private fun runFrame() {
+            if (framesRun++ % 32 == 0) checkActive()
+            // Silero's public ONNX graph expects the previous 64 samples
+            // prepended to each 512-sample frame. Its Python wrapper performs
+            // this concatenation; mobile callers must do it explicitly.
+            val modelInput = FloatArray(CONTEXT_SAMPLES + FRAME_SAMPLES)
+            contextSamples.copyInto(modelInput, 0)
+            frame.copyInto(modelInput, CONTEXT_SAMPLES)
+            OnnxTensor.createTensor(
+                env,
+                FloatBuffer.wrap(modelInput),
+                longArrayOf(1, modelInput.size.toLong()),
+            ).use { input ->
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(state), longArrayOf(2, 1, 128)).use { stateTensor ->
+                    session.run(mapOf("input" to input, "state" to stateTensor, "sr" to srTensor)).use { result ->
+                        @Suppress("UNCHECKED_CAST")
+                        val output = result[0].value as Array<FloatArray>
+                        probabilities.add(output[0][0])
+                        @Suppress("UNCHECKED_CAST")
+                        val next = result[1].value as Array<Array<FloatArray>>
+                        state = FloatArray(256).also { flattened ->
+                            var p = 0
+                            next.forEach { batch -> batch.forEach { row -> row.forEach { flattened[p++] = it } } }
                         }
+                        contextSamples = frame.copyOfRange(
+                            FRAME_SAMPLES - CONTEXT_SAMPLES,
+                            FRAME_SAMPLES,
+                        )
                     }
                 }
             }
+            fill = 0
         }
-        options.close()
-        return probabilities
+
+        override fun close() {
+            runCatching { srTensor.close() }
+            runCatching { session.close() }
+            runCatching { options.close() }
+        }
     }
 
-    private fun resample(input: FloatArray, fromRate: Int, toRate: Int): FloatArray {
-        if (input.isEmpty() || fromRate == toRate) return input
-        val outputSize = (input.size.toLong() * toRate / fromRate).toInt()
-        return FloatArray(outputSize) { i ->
-            val source = i.toDouble() * fromRate / toRate
-            val left = source.toInt().coerceIn(0, input.lastIndex)
-            val right = (left + 1).coerceAtMost(input.lastIndex)
-            val fraction = (source - left).toFloat()
-            input[left] + (input[right] - input[left]) * fraction
+    /**
+     * Streaming linear resampler feeding [sink] one target-rate sample at a
+     * time. Deliberately reproduces the array version's edge behaviour: the
+     * trailing outputs repeat the final input sample instead of
+     * interpolating past it, because that version clamped its right index.
+     */
+    private class Resampler(
+        var sourceRate: Int,
+        private val targetRate: Int,
+        private val sink: (Float) -> Unit,
+    ) {
+        var inputCount = 0L
+            private set
+        var outputCount = 0L
+            private set
+        private var previous = 0f
+
+        fun push(sample: Float) {
+            // Outputs landing in [inputCount-1, inputCount) interpolate
+            // between the previous sample and this one.
+            if (inputCount > 0) {
+                var position = outputCount.toDouble() * sourceRate / targetRate
+                while (position < inputCount) {
+                    val fraction = (position - (inputCount - 1)).toFloat()
+                    sink(previous + (sample - previous) * fraction)
+                    outputCount++
+                    position = outputCount.toDouble() * sourceRate / targetRate
+                }
+            }
+            previous = sample
+            inputCount++
+        }
+
+        fun finish() {
+            if (inputCount == 0L) return
+            val total = inputCount * targetRate / sourceRate
+            while (outputCount < total) {
+                sink(previous)
+                outputCount++
+            }
         }
     }
 
