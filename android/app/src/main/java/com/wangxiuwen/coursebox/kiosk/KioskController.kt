@@ -89,10 +89,23 @@ object KioskController {
         return am.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE
     }
 
-    /** Service hatch: drop out of kiosk so the device can be used normally. */
+    /**
+     * Service hatch: drop out of kiosk so the device can be used normally.
+     *
+     * Also gives up device ownership, because that is the only way back —
+     * `adb shell dpm remove-active-admin` refuses to touch a non-test admin,
+     * so a device owner that never clears itself leaves the app permanently
+     * unremovable. Re-arm later with `dpm set-device-owner`, which needs a
+     * device with no accounts added.
+     */
     fun release(activity: Activity) {
         runCatching { activity.stopLockTask() }
             .onFailure { Log.w(TAG, "stopLockTask failed", it) }
+        if (isDeviceOwner(activity)) {
+            @Suppress("DEPRECATION")
+            runCatching { dpm(activity).clearDeviceOwnerApp(activity.packageName) }
+                .onFailure { Log.w(TAG, "clearDeviceOwnerApp failed", it) }
+        }
         WindowInsetsControllerCompat(activity.window, activity.window.decorView)
             .show(WindowInsetsCompat.Type.systemBars())
         activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

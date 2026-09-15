@@ -20,7 +20,9 @@ android {
         // even between semver bumps.
         versionCode = ((System.currentTimeMillis() - 1704067200_000L) / 1000)
             .toInt().coerceAtLeast(1)
-        ndk { abiFilters += listOf("arm64-v8a") }
+        // armeabi-v7a kept for 32-bit learning tablets (e.g. XGS M5,
+        // Android 11); onnxruntime ships that ABI too.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     buildFeatures {
