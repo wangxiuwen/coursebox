@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.BackHandler
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -128,6 +129,18 @@ fun RootScreen(library: CourseLibrary) {
             readyApk = apk
         }.onFailure { e ->
             downloadError = e.message ?: "未知错误"
+        }
+    }
+
+    // Take back over from the nav graph. Registered after NavHost, so it
+    // wins, and it pops only while there is somewhere to pop to. Hammering
+    // back used to be able to drain the stack past the start destination —
+    // the nav host then has nothing to show and renders an empty screen,
+    // which under kiosk is unescapable: back is swallowed, this app is the
+    // launcher, and a blank screen has no button to press.
+    BackHandler(enabled = true) {
+        if (nav.previousBackStackEntry != null) {
+            nav.popBackStack()
         }
     }
 
