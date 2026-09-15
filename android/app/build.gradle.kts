@@ -20,7 +20,26 @@ android {
         // even between semver bumps.
         versionCode = ((System.currentTimeMillis() - 1704067200_000L) / 1000)
             .toInt().coerceAtLeast(1)
-        ndk { abiFilters += listOf("arm64-v8a") }
+        // armeabi-v7a kept for 32-bit learning tablets (e.g. XGS M5,
+        // Android 11); onnxruntime ships that ABI too.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+    }
+
+    // Two images from one tree: `normal` is an ordinary app that can be
+    // exited; `kiosk` takes over the device (device owner, lock task, full
+    // screen). Everything they share lives in src/main — only the controller
+    // implementation, the launcher/device-admin manifest entries and the
+    // fullscreen theme differ, so a fix lands in both by default instead of
+    // needing to be cherry-picked across branches.
+    flavorDimensions += "mode"
+    productFlavors {
+        create("normal") {
+            dimension = "mode"
+        }
+        create("kiosk") {
+            dimension = "mode"
+            versionNameSuffix = "-kiosk"
+        }
     }
 
     buildFeatures {
