@@ -4,6 +4,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -76,17 +78,26 @@ fun LanImportScreen(receiver: NearbyReceiveHost, nav: NavHostController) {
                         Column { QrSection(qr, url, serverStatus) }
                     }
                     Spacer(Modifier.width(12.dp))
-                    Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .verticalScroll(rememberScrollState()),
+                    ) {
                         ResultsList(rows)
                     }
                 }
             } else {
-                Column(
+                // One scrolling list for the whole page. The QR block alone is
+                // taller than half a small screen, so keeping it pinned left
+                // the results in a sliver that could not be scrolled past.
+                LazyColumn(
                     modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = PaddingValues(bottom = 24.dp),
                 ) {
-                    QrSection(qr, url, serverStatus)
-                    ResultsList(rows, modifier = Modifier.weight(1f))
+                    item { QrSection(qr, url, serverStatus) }
+                    item { ResultsList(rows) }
                 }
             }
         }
@@ -112,11 +123,15 @@ private fun QrSection(qr: android.graphics.Bitmap?, url: String?, serverStatus: 
                 style = MaterialTheme.typography.bodySmall,
             )
             qr?.let { bmp ->
+                // 220dp is right on a phone but eats a 360dp-wide learning
+                // tablet; cap it at a share of the screen instead.
+                val screenWidthDp = LocalConfiguration.current.screenWidthDp
+                val qrSize = minOf(220, (screenWidthDp * 0.55f).toInt()).dp
                 Image(
                     bitmap = bmp.asImageBitmap(),
                     contentDescription = "二维码",
                     modifier = Modifier
-                        .size(220.dp)
+                        .size(qrSize)
                         .clip(RoundedCornerShape(8.dp)),
                 )
             }
@@ -154,12 +169,11 @@ private fun ResultsList(rows: List<NearbyReceiveHost.FileRow>, modifier: Modifie
                     color = InkSoft,
                 )
             } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    items(rows.size) { i ->
-                        val r = rows[i]
+                // Plain Column, not LazyColumn: this whole card is one item
+                // of the page-level list, and upload runs are short enough
+                // that laziness buys nothing.
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for (r in rows) {
                         val accent = when (r.state) {
                             "done" -> Color(0xFF0A7A3F)
                             "error" -> Color(0xFFC93B3B)
