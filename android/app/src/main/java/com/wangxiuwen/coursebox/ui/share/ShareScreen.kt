@@ -7,6 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -126,8 +128,16 @@ fun ShareScreen(library: CourseLibrary, initialCourseId: String?, nav: NavHostCo
                 Text("批量分享课程", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color.Black)
             }
 
+            // Scrollable: the course card, the compatibility button, the peer
+            // list and the progress card together overflow a small screen, and
+            // without this the send progress sat below the fold permanently —
+            // unreachable exactly while it was the thing worth watching. The
+            // inner lists stay bounded by heightIn, so nesting is safe.
             Column(
-                modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Card(title = "选择课程 (${selectedPackages.size}/${packages.size})") {
