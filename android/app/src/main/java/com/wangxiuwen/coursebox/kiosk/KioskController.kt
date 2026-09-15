@@ -103,8 +103,26 @@ object KioskController {
     }
 
     private fun startLockTask(activity: Activity) {
-        if (isLockTaskActive(activity)) return
-        if (isDeviceOwner(activity)) {
+        val owner = isDeviceOwner(activity)
+        when (lockTaskState(activity)) {
+            // Already as locked down as it gets.
+            ActivityManager.LOCK_TASK_MODE_LOCKED -> return
+
+            ActivityManager.LOCK_TASK_MODE_PINNED -> {
+                // Pinning is the weaker mode a non-owner falls back to, and
+                // it can be escaped by holding back + overview. If device
+                // ownership was granted after we pinned — restored by hand,
+                // say — leaving it alone means the box silently stays
+                // escapable. Drop the pin so the restart below re-enters
+                // properly; a non-owner has nothing better to switch to.
+                if (!owner) return
+                runCatching { activity.stopLockTask() }
+                    .onFailure { Log.w(TAG, "unpin before re-lock failed", it) }
+            }
+
+            else -> Unit
+        }
+        if (owner) {
             // Whitelist ourselves first, else startLockTask still prompts.
             runCatching {
                 dpm(activity).setLockTaskPackages(
@@ -115,6 +133,9 @@ object KioskController {
         runCatching { activity.startLockTask() }
             .onFailure { Log.w(TAG, "startLockTask failed", it) }
     }
+
+    private fun lockTaskState(ctx: Context): Int =
+        (ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).lockTaskModeState
 
     /**
      * Rotation lock, in-app, because the quick-settings tile that normally
@@ -142,10 +163,8 @@ object KioskController {
     /** True while kiosk is meant to be enforcing; false after an exit. */
     fun isActive(): Boolean = !suspended
 
-    fun isLockTaskActive(ctx: Context): Boolean {
-        val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        return am.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE
-    }
+    fun isLockTaskActive(ctx: Context): Boolean =
+        lockTaskState(ctx) != ActivityManager.LOCK_TASK_MODE_NONE
 
     /**
      * Service hatch: drop out of kiosk so the device can be used normally.
