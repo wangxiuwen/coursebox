@@ -121,17 +121,56 @@ class CourseLibrary private constructor(
      */
     suspend fun removePackage(courseId: String) {
         val pkg = state.packages.firstOrNull { it.id == courseId } ?: return
+        val surviving = state.packages.filter { it.id != courseId }
         // Forget pinned / learning state for this id too.
         stateFlow.value = state.copy(
-            packages = state.packages.filter { it.id != courseId },
+            packages = surviving,
             pinned = state.pinned.filter { it != courseId },
             learning = state.learning - courseId,
         )
         persist()
         withContext(Dispatchers.IO) {
-            pkg.cxPaths.forEach { runCatching { File(it).delete() } }
-            runCatching { File(pkg.lessonsManifestPath).delete() }
+            deleteUnreferenced(dropped = listOf(pkg), surviving = surviving)
         }
+    }
+
+    /**
+     * Delete backing files that no surviving record points at any more.
+     *
+     * Never delete by record alone: one .cx can back several courses —
+     * manifest.courses is a list and every course in it gets a record
+     * pointing at the same file — and staged lessons json is named after the
+     * zip entry, so two packages can share one. Removing one course used to
+     * delete the shared file out from under its siblings, leaving records
+     * whose bytes were gone.
+     */
+    private fun deleteUnreferenced(
+        dropped: List<CoursePackageRecord>,
+        surviving: List<CoursePackageRecord>,
+    ) {
+        val keptCx = surviving.flatMapTo(mutableSetOf()) { it.cxPaths }
+        val keptLessons = surviving.mapTo(mutableSetOf()) { it.lessonsManifestPath }
+
+        dropped.flatMap { it.cxPaths }.toSet()
+            .filterNot { it in keptCx }
+            .forEach { path ->
+                val file = File(path)
+                runCatching { file.delete() }
+                // manifest_<digest>.json is written next to cx_<digest>.cx;
+                // multipart files are cx_<id>_<name> and must not match.
+                val digest = file.name.removePrefix("cx_").removeSuffix(".cx")
+                val isDigestName = file.name.startsWith("cx_") &&
+                    file.name.endsWith(".cx") &&
+                    digest.length == 64 &&
+                    digest.all { it.isDigit() || it in 'a'..'f' }
+                if (isDigestName) {
+                    runCatching { File(packagesDir, "manifest_$digest.json").delete() }
+                }
+            }
+
+        dropped.map { it.lessonsManifestPath }.toSet()
+            .filterNot { it in keptLessons }
+            .forEach { runCatching { File(it).delete() } }
     }
 
     suspend fun togglePinned(courseId: String) {
@@ -248,6 +287,11 @@ class CourseLibrary private constructor(
         val now = Instant.now().toString()
         val incomingIds = manifest.courses.map { it.id }.toSet()
         val replacedPackages = state.packages.filter { it.id !in incomingIds }
+        // Records about to be superseded. Re-importing the same bytes keeps
+        // the same cx_<digest>.cx path so nothing is swept; re-importing an
+        // edited course changes the digest, and the old file would otherwise
+        // sit on disk forever.
+        val supersededPackages = state.packages.filter { it.id in incomingIds }
         val newRecords = manifest.courses.map { c ->
             val perCourseLessonsPath = if (c.lessonsManifest == manifest.courses.first().lessonsManifest)
                 lessonsPath else stageLessonsJson(archive, cxFile, c.lessonsManifest)
@@ -271,6 +315,11 @@ class CourseLibrary private constructor(
 
         File(packagesDir, "manifest_$cxDigest.json").writeText(manifestStr)
         persist()
+
+        deleteUnreferenced(
+            dropped = supersededPackages,
+            surviving = replacedPackages + newRecords,
+        )
 
         return ImportResult(newRecords, resourceIndex.size)
     }
