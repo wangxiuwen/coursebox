@@ -177,11 +177,13 @@ private fun ResultsList(rows: List<NearbyReceiveHost.FileRow>, modifier: Modifie
                         val accent = when (r.state) {
                             "done" -> Color(0xFF0A7A3F)
                             "error" -> Color(0xFFC93B3B)
+                            "receiving" -> Color(0xFF1A66C9)
                             else -> InkSoft
                         }
                         val marker = when (r.state) {
                             "done" -> "✓"
                             "error" -> "✗"
+                            "receiving" -> "↓"
                             else -> "•"
                         }
                         Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
