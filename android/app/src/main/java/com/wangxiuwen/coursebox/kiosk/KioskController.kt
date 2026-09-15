@@ -6,6 +6,7 @@ import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.UserManager
 import android.provider.Settings
@@ -41,6 +42,18 @@ object KioskController {
     private const val SETTINGS_PACKAGE = "com.android.settings"
 
     /**
+     * Set once the user has stepped out of kiosk this session, so
+     * [apply] stops pulling the bars back and re-locking on every focus
+     * change. Cleared by a process restart, which is what makes
+     * [exitLockTask] temporary and survivable.
+     */
+    @Volatile
+    private var suspended = false
+
+    private const val PREFS = "kiosk"
+    private const val KEY_ROTATION_LOCKED = "rotation_locked"
+
+    /**
      * Applied while we are device owner. Settings has to stay reachable so
      * the device can be moved to another wifi network, which means the
      * destructive corners of it need closing off. Debugging is deliberately
@@ -69,6 +82,7 @@ object KioskController {
      * focus — the system restores bars after dialogs, volume HUD, etc.
      */
     fun apply(activity: Activity) {
+        if (suspended) return
         goFullScreen(activity)
         activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
@@ -102,6 +116,32 @@ object KioskController {
             .onFailure { Log.w(TAG, "startLockTask failed", it) }
     }
 
+    /**
+     * Rotation lock, in-app, because the quick-settings tile that normally
+     * carries it is part of the panel lock task keeps shut. Pins the current
+     * orientation; the choice survives restarts.
+     */
+    fun isRotationLocked(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_ROTATION_LOCKED, false)
+
+    fun setRotationLocked(activity: Activity, locked: Boolean) {
+        activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_ROTATION_LOCKED, locked).apply()
+        applyRotationLock(activity)
+    }
+
+    fun applyRotationLock(activity: Activity) {
+        activity.requestedOrientation = if (isRotationLocked(activity)) {
+            ActivityInfo.SCREEN_ORIENTATION_LOCKED
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
+    /** True while kiosk is meant to be enforcing; false after an exit. */
+    fun isActive(): Boolean = !suspended
+
     fun isLockTaskActive(ctx: Context): Boolean {
         val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         return am.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE
@@ -116,7 +156,38 @@ object KioskController {
      * unremovable. Re-arm later with `dpm set-device-owner`, which needs a
      * device with no accounts added.
      */
+    /**
+     * Temporary way out, for the visible "exit" control: unpin and show the
+     * bars, but stay device owner so the next launch locks down again. This
+     * is the one an ordinary user should ever need.
+     */
+    fun exitLockTask(activity: Activity) {
+        suspended = true
+        // stopLockTask only releases the calling task, and this app can hold
+        // several at once — it is both LAUNCHER and HOME, so the two launch
+        // paths build separate tasks and each one entered lock task. Emptying
+        // the whitelist ends all of them; startLockTask re-fills it.
+        clearLockTaskWhitelist(activity)
+        runCatching { activity.stopLockTask() }
+            .onFailure { Log.w(TAG, "stopLockTask failed", it) }
+        showSystemBars(activity)
+        activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    private fun clearLockTaskWhitelist(activity: Activity) {
+        if (!isDeviceOwner(activity)) return
+        runCatching { dpm(activity).setLockTaskPackages(admin(activity), emptyArray()) }
+            .onFailure { Log.w(TAG, "clearing lock task packages failed", it) }
+    }
+
+    private fun showSystemBars(activity: Activity) {
+        WindowInsetsControllerCompat(activity.window, activity.window.decorView)
+            .show(WindowInsetsCompat.Type.systemBars())
+    }
+
     fun release(activity: Activity) {
+        suspended = true
+        clearLockTaskWhitelist(activity)
         runCatching { activity.stopLockTask() }
             .onFailure { Log.w(TAG, "stopLockTask failed", it) }
         if (isDeviceOwner(activity)) {
@@ -132,8 +203,7 @@ object KioskController {
             runCatching { dpm.clearDeviceOwnerApp(activity.packageName) }
                 .onFailure { Log.w(TAG, "clearDeviceOwnerApp failed", it) }
         }
-        WindowInsetsControllerCompat(activity.window, activity.window.decorView)
-            .show(WindowInsetsCompat.Type.systemBars())
+        showSystemBars(activity)
         activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
@@ -153,15 +223,21 @@ object KioskController {
             )
         }.onFailure { Log.w(TAG, "stay-on policy failed", it) }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            // Home and recents stay off — those are the ways out. Global
-            // actions stay on so the long-press power menu can still shut the
-            // device down, and system info so the clock and the wifi/battery
-            // icons are readable when a panel pulls the status bar up.
+            // Recents stays off. HOME is on only because the platform
+            // rejects NOTIFICATIONS without it
+            // ("Cannot use LOCK_TASK_FEATURE_NOTIFICATIONS without
+            // LOCK_TASK_FEATURE_HOME") — and it costs nothing here, since
+            // this app is the device's launcher, so HOME lands back on the
+            // player. Notifications and global actions stay reachable
+            // because a box you cannot read a notification on, or power
+            // off, is broken rather than focused.
             runCatching {
                 dpm.setLockTaskFeatures(
                     admin,
                     DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS or
-                        DevicePolicyManager.LOCK_TASK_FEATURE_SYSTEM_INFO,
+                        DevicePolicyManager.LOCK_TASK_FEATURE_SYSTEM_INFO or
+                        DevicePolicyManager.LOCK_TASK_FEATURE_HOME or
+                        DevicePolicyManager.LOCK_TASK_FEATURE_NOTIFICATIONS,
                 )
             }.onFailure { Log.w(TAG, "lock task features failed", it) }
         }

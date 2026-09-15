@@ -25,18 +25,18 @@ class MainActivity : ComponentActivity() {
 
     /** Timestamps of recent volume-down presses (the escape-hatch gesture). */
     private val adminTaps = ArrayDeque<Long>()
-    private var kioskEnabled = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         KioskController.applyOwnerPolicies(this)
+        KioskController.applyRotationLock(this)
         KioskController.apply(this)
 
         // Kiosk: back must never fall through to finishing the activity, or
         // the user lands on the launcher.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (!kioskEnabled) {
+                if (!KioskController.isActive()) {
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
                 }
@@ -56,7 +56,7 @@ class MainActivity : ComponentActivity() {
         super.onWindowFocusChanged(hasFocus)
         // Dialogs, the volume HUD and transient swipes all bring the bars
         // back; re-hide whenever we own the window again.
-        if (hasFocus && kioskEnabled) KioskController.apply(this)
+        if (hasFocus) KioskController.apply(this)
     }
 
     override fun onUserLeaveHint() {
@@ -66,7 +66,7 @@ class MainActivity : ComponentActivity() {
         // bouncing here would also slam the door on screens we open on
         // purpose — the wifi panel and the file picker used to import a
         // course both leave the activity and would be thrown straight out.
-        if (kioskEnabled && !KioskController.isLockTaskActive(this)) {
+        if (KioskController.isActive() && !KioskController.isLockTaskActive(this)) {
             startActivity(intent)
         }
     }
@@ -75,7 +75,7 @@ class MainActivity : ComponentActivity() {
         // Escape hatch lives on VOLUME_DOWN rather than a screen corner: every
         // corner of the player already has a control, and a dialog opening
         // mid-sequence would swallow the rest of the taps.
-        if (kioskEnabled && keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+        if (KioskController.isActive() && keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
             registerAdminTap()
         }
         return super.onKeyDown(keyCode, event)
@@ -92,7 +92,6 @@ class MainActivity : ComponentActivity() {
         adminTaps.addLast(now)
         if (adminTaps.size >= KioskController.ADMIN_TAP_COUNT) {
             adminTaps.clear()
-            kioskEnabled = false
             KioskController.release(this)
             Toast.makeText(this, R.string.kiosk_released, Toast.LENGTH_LONG).show()
         }
