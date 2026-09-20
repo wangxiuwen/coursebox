@@ -36,9 +36,34 @@ data class GhRelease(
     val draft: Boolean = false,
 )
 
+/**
+ * One installable image inside a release. A release ships one apk per
+ * flavour, and which one a device should take is usually — but not always —
+ * the flavour it is already running, so the choice is surfaced instead of
+ * being made silently. See [UpdateChecker.check].
+ */
+data class UpdateVariant(
+    val asset: GhAsset,
+    val isKiosk: Boolean,
+    /** True for the image matching the flavour this build was compiled as. */
+    val isOurs: Boolean,
+) {
+    val label: String get() = if (isKiosk) "课堂固定版（整机锁定）" else "普通版"
+
+    val note: String get() = if (isKiosk) {
+        "开机直接进课程, 锁住返回和桌面, 适合专用学习平板"
+    } else {
+        "普通 App, 可以随时退出, 适合手机和共用平板"
+    }
+}
+
 data class UpdateAvailable(
     val release: GhRelease,
+    /** The image pre-selected in the prompt: this build's own flavour. */
     val apkAsset: GhAsset,
+    /** Everything the user may pick from — one entry when the choice is
+     *  locked down (see [UpdateChecker.check]). */
+    val variants: List<UpdateVariant>,
     val currentVersion: String,
     val latestVersion: String,
 )
@@ -46,45 +71,74 @@ data class UpdateAvailable(
 object UpdateChecker {
     private val json = Json { ignoreUnknownKeys = true }
 
+    private fun isKioskAsset(name: String) = name.contains("kiosk", ignoreCase = true)
+
+    private fun isOurFlavour(assetName: String, tag: String): Boolean =
+        if (tag.isEmpty()) !isKioskAsset(assetName) else assetName.contains(tag, ignoreCase = true)
+
     /**
-     * Hit GitHub Releases API for the latest release, compare to the local
-     * versionName. Returns non-null when a newer stable release ships an
-     * Android APK asset. Returns null for any failure (no network, no
-     * release, no matching asset, parse error) — silent so the UI can just
-     * skip prompting.
+     * The images this build may install, own flavour first — that one is the
+     * prompt's default. Pure, so the flavour rules are testable without a
+     * network round-trip or a device.
      */
-    /**
-     * A release carries one apk per flavour, so "the first apk" is not good
-     * enough: a kiosk tablet that installed the normal apk would be left with
-     * device ownership recorded against a receiver that apk does not ship,
-     * unclearable short of a factory reset. Each build therefore takes only
-     * the asset carrying its own tag, and the untagged normal build refuses
-     * anything that looks like a kiosk asset.
-     */
-    private fun isOurFlavour(assetName: String): Boolean {
-        val tag = BuildConfig.UPDATE_ASSET_TAG
-        return if (tag.isEmpty()) {
-            !assetName.contains("kiosk", ignoreCase = true)
-        } else {
-            assetName.contains(tag, ignoreCase = true)
-        }
+    internal fun variantsFor(
+        assets: List<GhAsset>,
+        tag: String = BuildConfig.UPDATE_ASSET_TAG,
+        allowFlavourChange: Boolean = true,
+    ): List<UpdateVariant> {
+        val all = assets
+            .filter {
+                it.name.endsWith(".apk", ignoreCase = true) &&
+                    !it.name.contains("unsigned", ignoreCase = true)
+            }
+            .map {
+                UpdateVariant(
+                    asset = it,
+                    isKiosk = isKioskAsset(it.name),
+                    isOurs = isOurFlavour(it.name, tag),
+                )
+            }
+        val offered = if (allowFlavourChange) all else all.filter { it.isOurs }
+        return offered.sortedByDescending { it.isOurs }
     }
 
-    suspend fun check(currentVersion: String): UpdateAvailable? = withContext(Dispatchers.IO) {
+    /**
+     * A release carries one apk per flavour, so "the first apk" is not good
+     * enough — and which one is right is a question only the person holding
+     * the device can answer, so [check] hands back every image and the
+     * prompt lets them pick, with their current flavour pre-selected.
+     *
+     * The one case where there is no choice is a provisioned kiosk device:
+     * the normal apk ships no KioskAdminReceiver, so device ownership would
+     * end up recorded against a component that no longer exists, unclearable
+     * short of a factory reset. Such a device is offered the kiosk image
+     * only, and nothing at all if the release does not carry one.
+     *
+     * Returns null for any failure (no network, no release, no apk, parse
+     * error) — silent, so the UI can just skip prompting.
+     *
+     * @param allowFlavourChange false pins the device to its own image. Pass
+     *   `!KioskController.isDeviceOwner(ctx)` — see above for why.
+     */
+    suspend fun check(
+        currentVersion: String,
+        allowFlavourChange: Boolean = true,
+    ): UpdateAvailable? = withContext(Dispatchers.IO) {
         val release = fetchLatest() ?: return@withContext null
         if (release.prerelease || release.draft) return@withContext null
 
-        val apkAsset = release.assets.firstOrNull {
-            it.name.endsWith(".apk", ignoreCase = true) &&
-                !it.name.contains("unsigned", ignoreCase = true) &&
-                isOurFlavour(it.name)
-        } ?: return@withContext null
+        // Our own image is the default. A release that predates the flavour
+        // split carries a single untagged apk, which no kiosk build matches —
+        // a provisioned kiosk device is then offered nothing, by design.
+        val variants = variantsFor(release.assets, allowFlavourChange = allowFlavourChange)
+        val default = variants.firstOrNull() ?: return@withContext null
 
         if (!isNewer(currentVersion, release.tag_name)) return@withContext null
 
         UpdateAvailable(
             release = release,
-            apkAsset = apkAsset,
+            apkAsset = default.asset,
+            variants = variants,
             currentVersion = currentVersion,
             latestVersion = release.tag_name.removePrefix("v"),
         )

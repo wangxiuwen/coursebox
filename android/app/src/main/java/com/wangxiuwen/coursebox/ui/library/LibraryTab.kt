@@ -57,6 +57,8 @@ import com.wangxiuwen.coursebox.core.CoursePackageRecord
 import com.wangxiuwen.coursebox.core.LanImportServer
 import com.wangxiuwen.coursebox.core.UpdateAvailable
 import com.wangxiuwen.coursebox.core.UpdateChecker
+import com.wangxiuwen.coursebox.core.UpdateVariant
+import com.wangxiuwen.coursebox.ui.UpdateVariantPicker
 import com.wangxiuwen.coursebox.ui.theme.AccentBlue
 import com.wangxiuwen.coursebox.ui.theme.toneFor
 import kotlinx.coroutines.launch
@@ -92,6 +94,7 @@ fun LibraryTab(
     var overflowOpen by remember { mutableStateOf(false) }
     var checking by remember { mutableStateOf(false) }
     var updateFound by remember { mutableStateOf<UpdateAvailable?>(null) }
+    var chosenVariant by remember { mutableStateOf<UpdateVariant?>(null) }
     var noUpdate by remember { mutableStateOf(false) }
     var downloading by remember { mutableStateOf(false) }
     var draggedCourseId by remember { mutableStateOf<String?>(null) }
@@ -160,11 +163,19 @@ fun LibraryTab(
                                 scope.launch {
                                     checking = true
                                     val result = runCatching {
-                                        UpdateChecker.check(BuildConfig.VERSION_NAME)
+                                        // A provisioned kiosk device may not
+                                        // be offered the normal image — see
+                                        // UpdateChecker.check.
+                                        UpdateChecker.check(
+                                            BuildConfig.VERSION_NAME,
+                                            allowFlavourChange = !KioskController.isDeviceOwner(ctx),
+                                        )
                                     }.getOrNull()
                                     checking = false
                                     if (result != null) {
                                         updateFound = result
+                                        chosenVariant = result.variants
+                                            .firstOrNull { it.asset.name == result.apkAsset.name }
                                     } else {
                                         noUpdate = true
                                     }
@@ -549,11 +560,20 @@ fun LibraryTab(
                 containerColor = Color.White,
                 title = { Text("发现新版本 v${u.latestVersion}") },
                 text = {
-                    Text(
-                        if (downloading) "正在后台下载…完成后会提示安装。"
-                        else "当前版本：v${u.currentVersion}\n\n" +
-                            (u.release.body.take(280).ifBlank { "点击立即下载, 完成后再确认安装。" }),
-                    )
+                    Column {
+                        Text(
+                            if (downloading) "正在后台下载…完成后会提示安装。"
+                            else "当前版本：v${u.currentVersion}\n\n" +
+                                (u.release.body.take(280).ifBlank { "点击立即下载, 完成后再确认安装。" }),
+                        )
+                        if (!downloading) {
+                            UpdateVariantPicker(
+                                variants = u.variants,
+                                selected = chosenVariant,
+                                onSelect = { chosenVariant = it },
+                            )
+                        }
+                    }
                 },
                 confirmButton = {
                     TextButton(
@@ -561,7 +581,8 @@ fun LibraryTab(
                         onClick = {
                             downloading = true
                             scope.launch {
-                                runCatching { UpdateChecker.download(ctx, u.apkAsset) }
+                                val asset = chosenVariant?.asset ?: u.apkAsset
+                                runCatching { UpdateChecker.download(ctx, asset) }
                                     .onSuccess { apk ->
                                         UpdateChecker.install(ctx, apk)
                                     }

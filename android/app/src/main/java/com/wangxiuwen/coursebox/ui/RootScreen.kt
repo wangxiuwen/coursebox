@@ -35,6 +35,8 @@ import com.wangxiuwen.coursebox.BuildConfig
 import com.wangxiuwen.coursebox.core.CourseLibrary
 import com.wangxiuwen.coursebox.core.UpdateAvailable
 import com.wangxiuwen.coursebox.core.UpdateChecker
+import com.wangxiuwen.coursebox.core.UpdateVariant
+import com.wangxiuwen.coursebox.kiosk.KioskController
 import com.wangxiuwen.coursebox.ui.chinese.ChineseLibraryScreen
 import com.wangxiuwen.coursebox.ui.library.LibraryTab
 import com.wangxiuwen.coursebox.ui.library.NearbyReceiveHost
@@ -96,6 +98,8 @@ fun RootScreen(library: CourseLibrary) {
 
     // Lifecycle of the update prompt: check → ask → download → install.
     var update by remember { mutableStateOf<UpdateAvailable?>(null) }
+    // Which image the user picked in the prompt; null until the check lands.
+    var chosenVariant by remember { mutableStateOf<UpdateVariant?>(null) }
     var promptDismissed by rememberSaveable { mutableStateOf(false) }
     var downloadStarted by remember { mutableStateOf(false) }
     var downloadProgress by remember { mutableFloatStateOf(0f) }
@@ -106,7 +110,14 @@ fun RootScreen(library: CourseLibrary) {
 
     // Step 1: check on launch.
     LaunchedEffect(Unit) {
-        update = UpdateChecker.check(BuildConfig.VERSION_NAME)
+        // A provisioned kiosk device may not be offered the normal image —
+        // see UpdateChecker.check.
+        val found = UpdateChecker.check(
+            BuildConfig.VERSION_NAME,
+            allowFlavourChange = !KioskController.isDeviceOwner(ctx),
+        )
+        update = found
+        chosenVariant = found?.variants?.firstOrNull { it.asset.name == found.apkAsset.name }
     }
 
     // Step 2: when the user confirms with 立即更新, run the download in the
@@ -116,7 +127,7 @@ fun RootScreen(library: CourseLibrary) {
         if (!downloadStarted) return@LaunchedEffect
         val u = update ?: return@LaunchedEffect
         runCatching {
-            UpdateChecker.download(ctx, u.apkAsset) { bytes, total ->
+            UpdateChecker.download(ctx, chosenVariant?.asset ?: u.apkAsset) { bytes, total ->
                 if (total > 0) {
                     downloadIndeterminate = false
                     downloadProgress = (bytes.toFloat() / total).coerceIn(0f, 1f)
@@ -221,10 +232,17 @@ fun RootScreen(library: CourseLibrary) {
                 containerColor = Color.White,
                 title = { Text("发现新版本 v${u.latestVersion}") },
                 text = {
-                    Text(
-                        "当前版本：v${u.currentVersion}\n\n" +
-                            (u.release.body.take(280).ifBlank { "点击立即更新, 下载会在后台进行, 不影响使用。" }),
-                    )
+                    androidx.compose.foundation.layout.Column {
+                        Text(
+                            "当前版本：v${u.currentVersion}\n\n" +
+                                (u.release.body.take(280).ifBlank { "点击立即更新, 下载会在后台进行, 不影响使用。" }),
+                        )
+                        UpdateVariantPicker(
+                            variants = u.variants,
+                            selected = chosenVariant,
+                            onSelect = { chosenVariant = it },
+                        )
+                    }
                 },
                 confirmButton = {
                     TextButton(

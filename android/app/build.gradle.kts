@@ -15,7 +15,7 @@ android {
         targetSdk = 34
         // Stable semver name — must match GitHub release tags (vX.Y.Z) so the
         // in-app update checker can compare. Bump on every release.
-        versionName = "0.10.33"
+        versionName = "0.10.34"
         // Monotonic versionCode from epoch-2024 so reinstall always advances
         // even between semver bumps.
         versionCode = ((System.currentTimeMillis() - 1704067200_000L) / 1000)
@@ -35,10 +35,12 @@ android {
     productFlavors {
         create("normal") {
             dimension = "mode"
-            // Which release asset this build may update itself to. A kiosk
-            // device that swallowed the normal apk would strand device
-            // ownership on a receiver that apk does not contain, and nothing
-            // short of a factory reset could clear it.
+            // Which release asset this build offers first. The other image
+            // is still selectable in the update prompt — except on a
+            // provisioned kiosk device, which may never take the normal apk:
+            // it ships no KioskAdminReceiver, so device ownership would be
+            // stranded on a missing component, unclearable short of a
+            // factory reset. See UpdateChecker.check.
             buildConfigField("String", "UPDATE_ASSET_TAG", "\"\"")
         }
         create("kiosk") {

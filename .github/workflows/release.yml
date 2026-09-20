@@ -44,15 +44,21 @@ jobs:
       - name: Rename APKs
         run: |
           mkdir -p out
-          # Asset names are load-bearing: UpdateChecker picks the asset whose
-          # name carries its own flavour tag, so a kiosk tablet never pulls
-          # the normal apk (which would strand device ownership on a receiver
-          # it does not ship). Keep "kiosk" in the kiosk name and out of the
-          # normal one.
+          # Asset names are load-bearing, twice over:
+          #  - UpdateChecker matches the asset carrying its own flavour tag,
+          #    so "kiosk" must stay in the kiosk name and out of the normal
+          #    one. A kiosk tablet that swallowed the normal apk would strand
+          #    device ownership on a receiver that apk does not ship.
+          #  - Builds up to v0.10.33 have no such matching: they take the
+          #    first apk of the release, and GitHub serves assets sorted by
+          #    name. "coursebox-android-" therefore has to sort before
+          #    "coursebox-kiosk-", or every old install updates itself into
+          #    the kiosk image. (v0.10.33 named it coursebox-android-kiosk-*,
+          #    which sorted first and did exactly that.)
           cp android/app/build/outputs/apk/normal/release/app-normal-release.apk \
              out/coursebox-android-${{ github.ref_name }}.apk
           cp android/app/build/outputs/apk/kiosk/release/app-kiosk-release.apk \
-             out/coursebox-android-kiosk-${{ github.ref_name }}.apk
+             out/coursebox-kiosk-android-${{ github.ref_name }}.apk
           ls -la out/
       - uses: actions/upload-artifact@v4
         with:
