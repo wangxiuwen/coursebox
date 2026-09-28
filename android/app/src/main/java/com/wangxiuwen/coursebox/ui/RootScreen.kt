@@ -36,7 +36,6 @@ import com.wangxiuwen.coursebox.core.CourseLibrary
 import com.wangxiuwen.coursebox.core.UpdateAvailable
 import com.wangxiuwen.coursebox.core.UpdateChecker
 import com.wangxiuwen.coursebox.core.UpdateVariant
-import com.wangxiuwen.coursebox.kiosk.KioskController
 import com.wangxiuwen.coursebox.ui.chinese.ChineseLibraryScreen
 import com.wangxiuwen.coursebox.ui.library.LibraryTab
 import com.wangxiuwen.coursebox.ui.library.NearbyReceiveHost
@@ -110,12 +109,7 @@ fun RootScreen(library: CourseLibrary) {
 
     // Step 1: check on launch.
     LaunchedEffect(Unit) {
-        // A provisioned kiosk device may not be offered the normal image —
-        // see UpdateChecker.check.
-        val found = UpdateChecker.check(
-            BuildConfig.VERSION_NAME,
-            allowFlavourChange = !KioskController.isDeviceOwner(ctx),
-        )
+        val found = UpdateChecker.check(BuildConfig.VERSION_NAME)
         update = found
         chosenVariant = found?.variants?.firstOrNull { it.asset.name == found.apkAsset.name }
     }
@@ -146,9 +140,7 @@ fun RootScreen(library: CourseLibrary) {
     // Take back over from the nav graph. Registered after NavHost, so it
     // wins, and it pops only while there is somewhere to pop to. Hammering
     // back used to be able to drain the stack past the start destination —
-    // the nav host then has nothing to show and renders an empty screen,
-    // which under kiosk is unescapable: back is swallowed, this app is the
-    // launcher, and a blank screen has no button to press.
+    // the nav host then has nothing to show and renders an empty screen.
     BackHandler(enabled = true) {
         if (nav.previousBackStackEntry != null) {
             nav.popBackStack()
@@ -203,13 +195,6 @@ fun RootScreen(library: CourseLibrary) {
                 version = update?.latestVersion.orEmpty(),
                 onTap = {
                     readyApk?.let { apk ->
-                        // The install confirm dialog lives in the system
-                        // installer, which lock task blocks unless it is
-                        // whitelisted first. Restore happens on focus return
-                        // (MainActivity).
-                        (ctx as? android.app.Activity)?.let {
-                            KioskController.allowAppInstall(it)
-                        }
                         runCatching { UpdateChecker.install(ctx, apk) }
                         installDismissed = true
                     }

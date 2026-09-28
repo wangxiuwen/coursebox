@@ -103,22 +103,15 @@ object UpdateChecker {
     }
 
     /**
-     * A release carries one apk per flavour, so "the first apk" is not good
-     * enough — and which one is right is a question only the person holding
-     * the device can answer, so [check] hands back every image and the
-     * prompt lets them pick, with their current flavour pre-selected.
-     *
-     * The one case where there is no choice is a provisioned kiosk device:
-     * the normal apk ships no KioskAdminReceiver, so device ownership would
-     * end up recorded against a component that no longer exists, unclearable
-     * short of a factory reset. Such a device is offered the kiosk image
-     * only, and nothing at all if the release does not carry one.
+     * A release carries its apk(s); [variantsFor] sorts our own flavour's
+     * image first so the prompt pre-selects it. The kiosk/normal split has
+     * been retired — one image ships per release — but the flavour-matching
+     * below stays: older releases on disk still carry kiosk-suffixed assets,
+     * and an old install checking such a release should still see them
+     * classified correctly.
      *
      * Returns null for any failure (no network, no release, no apk, parse
      * error) — silent, so the UI can just skip prompting.
-     *
-     * @param allowFlavourChange false pins the device to its own image. Pass
-     *   `!KioskController.isDeviceOwner(ctx)` — see above for why.
      */
     suspend fun check(
         currentVersion: String,
@@ -127,9 +120,8 @@ object UpdateChecker {
         val release = fetchLatest() ?: return@withContext null
         if (release.prerelease || release.draft) return@withContext null
 
-        // Our own image is the default. A release that predates the flavour
-        // split carries a single untagged apk, which no kiosk build matches —
-        // a provisioned kiosk device is then offered nothing, by design.
+        // Our own image is the default. With the flavour split retired the
+        // asset tag is empty, so every apk counts as ours and sorts as one.
         val variants = variantsFor(release.assets, allowFlavourChange = allowFlavourChange)
         val default = variants.firstOrNull() ?: return@withContext null
 

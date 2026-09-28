@@ -25,12 +25,6 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.FullscreenExit
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
-import androidx.compose.material.icons.filled.ScreenLockRotation
-import androidx.compose.material.icons.filled.ScreenRotation
-import androidx.compose.material.icons.filled.SettingsEthernet
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
@@ -49,7 +43,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import com.wangxiuwen.coursebox.kiosk.KioskController
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.navigation.NavHostController
@@ -79,11 +72,6 @@ fun LibraryTab(
     modifier: Modifier = Modifier,
 ) {
     val ctx = LocalContext.current
-    // Only a locked-down box needs the network shortcut; on a normal phone
-    // the user has quick settings.
-    val kioskActive = remember { KioskController.isDeviceOwner(ctx) }
-    var rotationLocked by remember { mutableStateOf(KioskController.isRotationLocked(ctx)) }
-    var lockdownOn by remember { mutableStateOf(KioskController.lockdownEnabled(ctx)) }
     val scope = rememberCoroutineScope()
     val state by library.stateFlow
 
@@ -166,13 +154,7 @@ fun LibraryTab(
                                 scope.launch {
                                     checking = true
                                     val result = runCatching {
-                                        // A provisioned kiosk device may not
-                                        // be offered the normal image — see
-                                        // UpdateChecker.check.
-                                        UpdateChecker.check(
-                                            BuildConfig.VERSION_NAME,
-                                            allowFlavourChange = !KioskController.isDeviceOwner(ctx),
-                                        )
+                                        UpdateChecker.check(BuildConfig.VERSION_NAME)
                                     }.getOrNull()
                                     checking = false
                                     if (result != null) {
@@ -214,115 +196,6 @@ fun LibraryTab(
                                 nav.navigate("share")
                             },
                         )
-                        if (kioskActive) {
-                            DropdownMenuItem(
-                                text = {
-                                    Text(if (rotationLocked) "方向已锁定" else "锁定当前方向")
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        if (rotationLocked) Icons.Default.ScreenLockRotation
-                                        else Icons.Default.ScreenRotation,
-                                        null,
-                                        tint = Color.Black,
-                                    )
-                                },
-                                colors = MenuDefaults.itemColors(
-                                    textColor = Color.Black,
-                                    leadingIconColor = Color.Black,
-                                ),
-                                onClick = {
-                                    overflowOpen = false
-                                    (ctx as? Activity)?.let {
-                                        rotationLocked = !rotationLocked
-                                        KioskController.setRotationLocked(it, rotationLocked)
-                                    }
-                                },
-                            )
-                        }
-                        // Free mode switching: the whole lock-down (lock
-                        // task, swallowed back, full screen) toggles at
-                        // runtime, so a kiosk image on a family phone is a
-                        // normal player and the dedicated tablet can be
-                        // temporarily unlocked without adb.
-                        if (kioskActive) {
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        if (lockdownOn) "学习机锁定：已开启"
-                                        else "学习机锁定：已关闭"
-                                    )
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        if (lockdownOn) Icons.Default.Lock else Icons.Default.LockOpen,
-                                        null,
-                                        tint = Color.Black,
-                                    )
-                                },
-                                colors = MenuDefaults.itemColors(
-                                    textColor = Color.Black,
-                                    leadingIconColor = Color.Black,
-                                ),
-                                onClick = {
-                                    overflowOpen = false
-                                    (ctx as? Activity)?.let {
-                                        lockdownOn = !lockdownOn
-                                        KioskController.setLockdownEnabled(it, lockdownOn)
-                                    }
-                                },
-                            )
-                        }
-                        // A visible way out, so leaving kiosk is not a
-                        // secret key sequence. Temporary by design: the next
-                        // launch locks down again, and the app stays device
-                        // owner. Full hand-back is still the volume-down
-                        // gesture.
-                        if (kioskActive) {
-                            DropdownMenuItem(
-                                text = { Text("退出全屏") },
-                                leadingIcon = {
-                                    Icon(
-                                        Icons.Default.FullscreenExit, null,
-                                        tint = Color.Black,
-                                    )
-                                },
-                                colors = MenuDefaults.itemColors(
-                                    textColor = Color.Black,
-                                    leadingIconColor = Color.Black,
-                                ),
-                                onClick = {
-                                    overflowOpen = false
-                                    (ctx as? Activity)?.let {
-                                        KioskController.exitLockTask(it)
-                                    }
-                                },
-                            )
-                        }
-                        // Kiosk devices have no launcher, so this is the
-                        // quickest route back online after the box moves to
-                        // a different room.
-                        if (kioskActive) {
-                            DropdownMenuItem(
-                                text = { Text("网络设置") },
-                                leadingIcon = {
-                                    Icon(
-                                        Icons.Default.SettingsEthernet, null,
-                                        tint = Color.Black,
-                                    )
-                                },
-                                colors = MenuDefaults.itemColors(
-                                    textColor = Color.Black,
-                                    leadingIconColor = Color.Black,
-                                ),
-                                onClick = {
-                                    overflowOpen = false
-                                    (ctx as? Activity)?.let {
-                                        KioskController.openNetworkSettings(it)
-                                    }
-                                },
-                            )
-                        }
                         // 文本朗读 (TTS) is an *in-lesson* assist for
                         // plain-text courses, not a top-level menu item —
                         // hidden here until it's wired into the reader view.

@@ -38,27 +38,17 @@ jobs:
           printf '%s' "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
           ls -la ~/.android/debug.keystore
           sha256sum ~/.android/debug.keystore
-      - name: Build APKs
+      - name: Build APK
         working-directory: android
-        run: ./gradlew :app:assembleNormalRelease :app:assembleKioskRelease
-      - name: Rename APKs
+        run: ./gradlew :app:assembleRelease
+      - name: Rename APK
         run: |
           mkdir -p out
-          # Asset names are load-bearing, twice over:
-          #  - UpdateChecker matches the asset carrying its own flavour tag,
-          #    so "kiosk" must stay in the kiosk name and out of the normal
-          #    one. A kiosk tablet that swallowed the normal apk would strand
-          #    device ownership on a receiver that apk does not ship.
-          #  - Builds up to v0.10.33 have no such matching: they take the
-          #    first apk of the release, and GitHub serves assets sorted by
-          #    name. "coursebox-android-" therefore has to sort before
-          #    "coursebox-kiosk-", or every old install updates itself into
-          #    the kiosk image. (v0.10.33 named it coursebox-android-kiosk-*,
-          #    which sorted first and did exactly that.)
-          cp android/app/build/outputs/apk/normal/release/app-normal-release.apk \
+          # One image per release. Name kept as coursebox-android-* so
+          # installs back to the flavour-split era still sort it first and
+          # UpdateChecker classifies it as their own flavour.
+          cp android/app/build/outputs/apk/release/app-release.apk \
              out/coursebox-android-${{ github.ref_name }}.apk
-          cp android/app/build/outputs/apk/kiosk/release/app-kiosk-release.apk \
-             out/coursebox-kiosk-android-${{ github.ref_name }}.apk
           ls -la out/
       - uses: actions/upload-artifact@v4
         with:

@@ -23,31 +23,10 @@ android {
         // armeabi-v7a kept for 32-bit learning tablets (e.g. XGS M5,
         // Android 11); onnxruntime ships that ABI too.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
-    }
-
-    // Two images from one tree: `normal` is an ordinary app that can be
-    // exited; `kiosk` takes over the device (device owner, lock task, full
-    // screen). Everything they share lives in src/main — only the controller
-    // implementation, the launcher/device-admin manifest entries and the
-    // fullscreen theme differ, so a fix lands in both by default instead of
-    // needing to be cherry-picked across branches.
-    flavorDimensions += "mode"
-    productFlavors {
-        create("normal") {
-            dimension = "mode"
-            // Which release asset this build offers first. The other image
-            // is still selectable in the update prompt — except on a
-            // provisioned kiosk device, which may never take the normal apk:
-            // it ships no KioskAdminReceiver, so device ownership would be
-            // stranded on a missing component, unclearable short of a
-            // factory reset. See UpdateChecker.check.
-            buildConfigField("String", "UPDATE_ASSET_TAG", "\"\"")
-        }
-        create("kiosk") {
-            dimension = "mode"
-            versionNameSuffix = "-kiosk"
-            buildConfigField("String", "UPDATE_ASSET_TAG", "\"kiosk\"")
-        }
+        // Kept for UpdateChecker's asset matcher: an empty tag means "any
+        // apk in the release is ours", which is now always true — the
+        // kiosk/normal split was retired and one image ships per release.
+        buildConfigField("String", "UPDATE_ASSET_TAG", "\"\"")
     }
 
     buildFeatures {
