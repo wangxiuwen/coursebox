@@ -15,6 +15,7 @@ import android.view.WindowManager
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.wangxiuwen.coursebox.CourseboxApp
 
 /**
  * Turns the player into a single-purpose appliance: full screen, no system
@@ -42,6 +43,15 @@ object KioskController {
     private const val SETTINGS_PACKAGE = "com.android.settings"
 
     /**
+     * System package installer. It has to sit on the lock-task whitelist
+     * for the duration of an in-app update — outside it, the install
+     * confirm dialog is silently blocked and the downloaded APK can never
+     * be installed. [restoreLockTaskPackages] takes it off again once the
+     * window regains focus.
+     */
+    private const val INSTALLER_PACKAGE = "com.android.packageinstaller"
+
+    /**
      * Set once the user has stepped out of kiosk this session, so
      * [apply] stops pulling the bars back and re-locking on every focus
      * change. Cleared by a process restart, which is what makes
@@ -52,6 +62,31 @@ object KioskController {
 
     private const val PREFS = "kiosk"
     private const val KEY_ROTATION_LOCKED = "rotation_locked"
+    private const val KEY_LOCKDOWN = "lockdown_enabled"
+
+    /**
+     * Runtime lock-down switch — the "free mode switching" control.
+     *
+     * Defaults to on only for a provisioned device owner (the dedicated
+     * learning tablet); anywhere else — a family phone that happened to get
+     * the kiosk image — it defaults to off, so the app behaves as a plain
+     * player instead of pinning the screen and swallowing back. Toggled
+     * from the library overflow menu, effective immediately.
+     */
+    fun lockdownEnabled(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_LOCKDOWN, isDeviceOwner(ctx))
+
+    fun setLockdownEnabled(activity: Activity, enabled: Boolean) {
+        activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_LOCKDOWN, enabled).apply()
+        if (enabled) {
+            suspended = false
+            apply(activity)
+        } else {
+            exitLockTask(activity)
+        }
+    }
 
     /**
      * Applied while we are device owner. Settings has to stay reachable so
@@ -83,6 +118,7 @@ object KioskController {
      */
     fun apply(activity: Activity) {
         if (suspended) return
+        if (!lockdownEnabled(activity)) return
         goFullScreen(activity)
         activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
@@ -168,8 +204,9 @@ object KioskController {
         }
     }
 
-    /** True while kiosk is meant to be enforcing; false after an exit. */
-    fun isActive(): Boolean = !suspended
+    /** True while kiosk is meant to be enforcing; false after an exit or
+     *  when lock-down is switched off for this device. */
+    fun isActive(): Boolean = !suspended && lockdownEnabled(CourseboxApp.instance)
 
     fun isLockTaskActive(ctx: Context): Boolean =
         lockTaskState(ctx) != ActivityManager.LOCK_TASK_MODE_NONE
@@ -276,6 +313,36 @@ object KioskController {
         }
         runCatching { dpm.setUninstallBlocked(admin, ctx.packageName, true) }
             .onFailure { Log.w(TAG, "uninstall block failed", it) }
+    }
+
+    /**
+     * Temporarily let the system package installer run under lock task so
+     * an in-app update can actually reach its confirm dialog. No-op when
+     * not device owner — a non-owner runs at most screen pinning, which
+     * never blocked the installer.
+     */
+    fun allowAppInstall(activity: Activity) {
+        if (!isDeviceOwner(activity)) return
+        runCatching {
+            dpm(activity).setLockTaskPackages(
+                admin(activity),
+                arrayOf(activity.packageName, SETTINGS_PACKAGE, INSTALLER_PACKAGE),
+            )
+        }.onFailure { Log.w(TAG, "allowing installer failed", it) }
+    }
+
+    /**
+     * Put the lock-task whitelist back to [startLockTask]'s default. Called
+     * whenever the window regains focus (see MainActivity); skipped while
+     * kiosk is suspended so an "exit full screen" is not quietly undone.
+     */
+    fun restoreLockTaskPackages(activity: Activity) {
+        if (!isDeviceOwner(activity) || !isActive()) return
+        runCatching {
+            dpm(activity).setLockTaskPackages(
+                admin(activity), arrayOf(activity.packageName, SETTINGS_PACKAGE),
+            )
+        }.onFailure { Log.w(TAG, "restoring lock task packages failed", it) }
     }
 
     /**

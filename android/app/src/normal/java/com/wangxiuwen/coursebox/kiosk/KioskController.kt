@@ -42,4 +42,13 @@ object KioskController {
     fun setRotationLocked(activity: Activity, locked: Boolean) = Unit
 
     fun applyRotationLock(activity: Activity) = Unit
+
+    /** Normal builds are never locked; the toggle is hidden in the UI. */
+    fun lockdownEnabled(ctx: Context): Boolean = false
+
+    fun setLockdownEnabled(activity: Activity, enabled: Boolean) = Unit
+
+    fun allowAppInstall(activity: Activity) = Unit
+
+    fun restoreLockTaskPackages(activity: Activity) = Unit
 }

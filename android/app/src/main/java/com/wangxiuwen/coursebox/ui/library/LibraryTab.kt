@@ -26,6 +26,8 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.ScreenLockRotation
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.SettingsEthernet
@@ -81,6 +83,7 @@ fun LibraryTab(
     // the user has quick settings.
     val kioskActive = remember { KioskController.isDeviceOwner(ctx) }
     var rotationLocked by remember { mutableStateOf(KioskController.isRotationLocked(ctx)) }
+    var lockdownOn by remember { mutableStateOf(KioskController.lockdownEnabled(ctx)) }
     val scope = rememberCoroutineScope()
     val state by library.stateFlow
 
@@ -233,6 +236,39 @@ fun LibraryTab(
                                     (ctx as? Activity)?.let {
                                         rotationLocked = !rotationLocked
                                         KioskController.setRotationLocked(it, rotationLocked)
+                                    }
+                                },
+                            )
+                        }
+                        // Free mode switching: the whole lock-down (lock
+                        // task, swallowed back, full screen) toggles at
+                        // runtime, so a kiosk image on a family phone is a
+                        // normal player and the dedicated tablet can be
+                        // temporarily unlocked without adb.
+                        if (kioskActive) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (lockdownOn) "学习机锁定：已开启"
+                                        else "学习机锁定：已关闭"
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        if (lockdownOn) Icons.Default.Lock else Icons.Default.LockOpen,
+                                        null,
+                                        tint = Color.Black,
+                                    )
+                                },
+                                colors = MenuDefaults.itemColors(
+                                    textColor = Color.Black,
+                                    leadingIconColor = Color.Black,
+                                ),
+                                onClick = {
+                                    overflowOpen = false
+                                    (ctx as? Activity)?.let {
+                                        lockdownOn = !lockdownOn
+                                        KioskController.setLockdownEnabled(it, lockdownOn)
                                     }
                                 },
                             )

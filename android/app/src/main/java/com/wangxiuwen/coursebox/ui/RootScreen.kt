@@ -203,6 +203,13 @@ fun RootScreen(library: CourseLibrary) {
                 version = update?.latestVersion.orEmpty(),
                 onTap = {
                     readyApk?.let { apk ->
+                        // The install confirm dialog lives in the system
+                        // installer, which lock task blocks unless it is
+                        // whitelisted first. Restore happens on focus return
+                        // (MainActivity).
+                        (ctx as? android.app.Activity)?.let {
+                            KioskController.allowAppInstall(it)
+                        }
                         runCatching { UpdateChecker.install(ctx, apk) }
                         installDismissed = true
                     }

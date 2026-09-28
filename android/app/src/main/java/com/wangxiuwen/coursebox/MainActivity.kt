@@ -23,6 +23,8 @@ import kotlinx.coroutines.launch
 
 private const val DEAD_BACK_COUNT = 3
 private const val DEAD_BACK_WINDOW_MS = 2_000L
+private const val PREFS = "kiosk"
+private const val KEY_RESET_NAV = "reset_nav_on_next_create"
 
 class MainActivity : ComponentActivity() {
 
@@ -33,7 +35,17 @@ class MainActivity : ComponentActivity() {
     private val deadBackPresses = ArrayDeque<Long>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+        // The self-rescue below recreates the activity — but Compose and
+        // NavController restore their state from savedInstanceState, so a
+        // screen that failed to render comes back exactly as broken. When
+        // the rescue fires we flag it here and drop the saved state, which
+        // lands the rebuild on the library instead of the dead screen.
+        val rescueNav = getSharedPreferences(PREFS, MODE_PRIVATE)
+            .getBoolean(KEY_RESET_NAV, false)
+        if (rescueNav) {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_RESET_NAV).apply()
+        }
+        super.onCreate(if (rescueNav) null else savedInstanceState)
         KioskController.applyOwnerPolicies(this)
         KioskController.applyRotationLock(this)
         KioskController.apply(this)
@@ -70,8 +82,13 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         // Dialogs, the volume HUD and transient swipes all bring the bars
-        // back; re-hide whenever we own the window again.
-        if (hasFocus) KioskController.apply(this)
+        // back; re-hide whenever we own the window again. Focus returning
+        // also means the update installer (allowed out for one confirm
+        // dialog) is done — take the lock-task whitelist back.
+        if (hasFocus) {
+            KioskController.restoreLockTaskPackages(this)
+            KioskController.apply(this)
+        }
     }
 
     override fun onUserLeaveHint() {
@@ -110,6 +127,11 @@ class MainActivity : ComponentActivity() {
         deadBackPresses.addLast(now)
         if (deadBackPresses.size >= DEAD_BACK_COUNT) {
             deadBackPresses.clear()
+            // Rebuild from scratch: the flag makes onCreate drop the saved
+            // UI state, so the fresh start lands on the library rather than
+            // re-entering whatever screen failed to render.
+            getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit().putBoolean(KEY_RESET_NAV, true).apply()
             recreate()
         }
     }
@@ -157,6 +179,11 @@ private fun BootGate() {
             ) { CircularProgressIndicator() }
         }
     } else {
+        // Warm the VAD sentence cache for every course in the background —
+        // it defers to playback, so it never gets in the learner's way.
+        androidx.compose.runtime.LaunchedEffect(lib) {
+            com.wangxiuwen.coursebox.ui.nce.SentencePrefetcher.start(lib)
+        }
         RootScreen(library = lib)
     }
 }
