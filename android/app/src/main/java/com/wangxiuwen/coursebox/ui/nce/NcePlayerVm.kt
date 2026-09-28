@@ -487,6 +487,20 @@ class NcePlayerVm(context: Context) : ViewModel() {
         }
     }
 
+    /**
+     * Drop this lesson's cached sentence boundaries and analyse again.
+     * Everything else keys off the cache, so this is the only way a stale
+     * or wrong segmentation gets rebuilt — per lesson, on demand.
+     */
+    fun reanalyzeCurrent() {
+        val index = currentIndex
+        val mediaPath = resolvedPaths.getOrNull(index)
+        if (!mediaPath.isNullOrBlank()) {
+            voiceActivityAnalyzer.deleteCache(mediaPath)
+        }
+        analyzeCurrentSentenceBoundaries()
+    }
+
     private fun analyzeCurrentSentenceBoundaries() {
         analysisJob?.cancel()
         cancelSentencePractice()

@@ -411,7 +411,26 @@ private fun SentenceListSheet(vm: NcePlayerVm, onDismiss: () -> Unit) {
                 .fillMaxHeight(0.82f)
                 .padding(horizontal = 18.dp),
         ) {
-            Text("句子列表", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("句子列表", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                TextButton(
+                    onClick = {
+                        onDismiss()
+                        vm.reanalyzeCurrent()
+                    },
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Text(
+                        "重新分析",
+                        color = PlayerAccent,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
             Text(
                 "点一句持续循环；打开跟读后仍只练这一句。关闭列表再继续下一句。",
                 style = MaterialTheme.typography.bodySmall,

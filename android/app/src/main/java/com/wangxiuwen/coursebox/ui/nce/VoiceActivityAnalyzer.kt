@@ -42,6 +42,17 @@ class VoiceActivityAnalyzer(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
     private val cacheDir = File(context.filesDir, "sentence_boundaries/v2")
 
+    /** True when [analyze] would return instantly from the on-disk cache.
+     *  The background prefetcher uses this to skip already-analysed lessons. */
+    fun hasCache(mediaPath: String): Boolean =
+        File(cacheDir, cacheKey(mediaPath) + ".json").isFile
+
+    /** Drop the cached segments for [mediaPath]. The next [analyze] runs the
+     *  model again and rewrites the cache — the "重新分析" path. */
+    fun deleteCache(mediaPath: String) {
+        runCatching { File(cacheDir, cacheKey(mediaPath) + ".json").delete() }
+    }
+
     suspend fun analyze(mediaPath: String): List<SpeechSegment> = withContext(Dispatchers.Default) {
         val checkActive = { ensureActive() }
         val cache = File(cacheDir, cacheKey(mediaPath) + ".json")
