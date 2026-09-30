@@ -171,7 +171,11 @@ private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: Co
                     shape = RoundedCornerShape(14.dp),
                 )
                 .clip(RoundedCornerShape(14.dp))
-                .background(Color.Black),
+                .background(Color.Black)
+                // The whole video face doubles as the pause/play target —
+                // the learner should never have to hunt for the small
+                // round button mid-lesson.
+                .clickable { vm.togglePlayPause() },
         ) {
             androidx.compose.ui.viewinterop.AndroidView(
                 modifier = Modifier.fillMaxSize(),
@@ -183,49 +187,38 @@ private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: Co
                 onDispose { /* surface auto-released with SurfaceView */ }
             }
         }
-    } else {
-        val coverModifier = if (isLandscape) {
-            Modifier
+    } else if (isLandscape) {
+        CoverFace(
+            lesson = lesson,
+            tone = tone,
+            onClick = { vm.togglePlayPause() },
+            modifier = Modifier
                 .padding(horizontal = 32.dp)
                 .fillMaxHeight(0.42f)
                 .aspectRatio(1f)
-                .align(Alignment.CenterHorizontally)
-        } else {
-            Modifier
-                .padding(horizontal = 32.dp)
+                .align(Alignment.CenterHorizontally),
+        )
+    } else {
+        // Portrait: the old fillMaxWidth + aspectRatio(1f) cover alone
+        // overflowed the M5's short display, pushing the transport controls
+        // half off screen — the play button looked "squashed" and was
+        // barely tappable. Bind the cover to whatever height is left after
+        // the fixed controls, as a centred square; it can shrink but the
+        // controls can never be pushed out.
+        BoxWithConstraints(
+            modifier = Modifier
+                .weight(1f)
                 .fillMaxWidth()
-                .aspectRatio(1f)
-        }
-        Box(
-            modifier = coverModifier
-                .clip(RoundedCornerShape(14.dp))
-                .background(tone.gradient),
+                .padding(horizontal = 24.dp),
+            contentAlignment = Alignment.Center,
         ) {
-            Text(
-                text = "B2",
-                color = Color.White.copy(alpha = 0.18f),
-                fontSize = 220.sp,
-                fontWeight = FontWeight.Black,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 0.dp, bottom = 0.dp)
-                    .offset(x = 12.dp, y = 40.dp),
+            val side = minOf(maxWidth, maxHeight)
+            CoverFace(
+                lesson = lesson,
+                tone = tone,
+                onClick = { vm.togglePlayPause() },
+                modifier = Modifier.size(side),
             )
-            Column(modifier = Modifier.fillMaxSize().padding(22.dp)) {
-                Text(
-                    "LESSON",
-                    color = OnDark.copy(alpha = 0.9f),
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    lesson.lesson.toString().padStart(2, '0'),
-                    color = OnDark,
-                    fontSize = 96.sp,
-                    fontWeight = FontWeight.Black,
-                )
-            }
         }
     }
 
@@ -253,40 +246,98 @@ private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: Co
         }
     }
 
-    Spacer(Modifier.height(if (isLandscape) 10.dp else 24.dp))
+    // Current-transcript glance card. The learner's "what was that
+    // sentence?" moment happens on this face — show the line being read
+    // right here, and let a tap open the full lyrics page. Replaces the
+    // old bottom flip pill (and gives video lessons a lyrics entry too).
+    val curLine = currentLineText(vm, lesson)
+    val curEn = curLine?.first.orEmpty().trim()
+    val curCn = curLine?.second.orEmpty().trim()
+    val curMain = when {
+        curEn.isNotBlank() -> curEn
+        curCn.isNotBlank() -> curCn
+        else -> "课文 / 单词"
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 32.dp)
+            .padding(top = if (isLandscape) 6.dp else 12.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0x26FFFFFF))
+            .clickable { vm.setFlip(true) }
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                curMain,
+                color = OnDark,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (curEn.isNotBlank() && curCn.isNotBlank()) {
+                Text(
+                    curCn,
+                    color = OnDarkDim,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Icon(
+            Icons.AutoMirrored.Filled.MenuBook,
+            contentDescription = "查看课文全文",
+            tint = OnDarkFaint,
+            modifier = Modifier.size(18.dp),
+        )
+    }
+
+    Spacer(Modifier.height(if (isLandscape) 6.dp else 10.dp))
     SliderRow(vm)
     SentenceTransportRow(vm)
     Spacer(Modifier.height(2.dp))
     TransportRow(vm)
     Spacer(Modifier.weight(1f))
+}
 
-    // The 课文/单词 flip button shifts focus away from the video. In
-    // landscape the screen is short and the controls already crowd the
-    // bottom, so just drop it — the user can tap the back chevron to
-    // rotate to portrait if they need the lyrics.
-    if (!isLandscape) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 36.dp, vertical = 24.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(Color(0x33FFFFFF))
-                    .clickable { vm.setFlip(true) }
-                    .padding(horizontal = 18.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-            Icon(
-                Icons.AutoMirrored.Filled.MenuBook,
-                contentDescription = null,
-                tint = OnDark,
-                modifier = Modifier.size(16.dp),
+/** Audio-lesson cover: gradient square with the book watermark and the
+ *  lesson number. Doubles as a giant play/pause target. */
+@Composable
+private fun CoverFace(lesson: NceLesson, tone: CourseTone, onClick: () -> Unit, modifier: Modifier) {
+    Box(
+        modifier = modifier
+            .clickable(onClick = onClick)
+            .clip(RoundedCornerShape(14.dp))
+            .background(tone.gradient),
+    ) {
+        Text(
+            text = if (lesson.book in 1..4) "B${lesson.book}" else lesson.bookLabel,
+            color = Color.White.copy(alpha = 0.18f),
+            fontSize = 220.sp,
+            fontWeight = FontWeight.Black,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .offset(x = 12.dp, y = 40.dp),
+        )
+        Column(modifier = Modifier.fillMaxSize().padding(22.dp)) {
+            Text(
+                "LESSON",
+                color = OnDark.copy(alpha = 0.9f),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
             )
-            Spacer(Modifier.width(6.dp))
-            Text("课文 / 单词", color = OnDark, style = MaterialTheme.typography.labelLarge)
-            }
+            Spacer(Modifier.weight(1f))
+            Text(
+                lesson.lesson.toString().padStart(2, '0'),
+                color = OnDark,
+                fontSize = 96.sp,
+                fontWeight = FontWeight.Black,
+            )
         }
     }
 }
@@ -391,6 +442,11 @@ private fun SentenceListSheet(vm: NcePlayerVm, onDismiss: () -> Unit) {
     var selectedIndex by remember {
         mutableIntStateOf(vm.activeSentenceIndex.coerceAtLeast(0))
     }
+    // One (en, cn) pair per VAD segment, so each row can show the actual
+    // sentence text the learner is trying to find.
+    val segmentTexts = remember(vm.speechSegments, vm.current) {
+        segmentLineTexts(vm.speechSegments, vm.current?.lines ?: emptyList(), vm.durationMs)
+    }
     // Position once when the sheet opens. Do not observe activeSentenceIndex:
     // tapping a row or ordinary playback must never pull that row to the top
     // while the learner is browsing the list.
@@ -481,14 +537,30 @@ private fun SentenceListSheet(vm: NcePlayerVm, onDismiss: () -> Unit) {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                "第 ${index + 1} 句",
+                                "第 ${index + 1} 句 · ${fmtTime(segment.startMs)}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = OnDarkFaint,
                                 fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                             )
-                            Text(
-                                "${fmtTime(segment.startMs)} – ${fmtTime(segment.endMs)}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = OnDarkDim,
-                            )
+                            val text = segmentTexts.getOrNull(index)
+                            if (text != null && text.first.isNotBlank()) {
+                                Text(
+                                    text.first,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            if (text != null && text.second.isNotBlank()) {
+                                Text(
+                                    text.second,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = OnDarkDim,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                         if (active) {
                             Text(
@@ -550,7 +622,7 @@ private fun TransportRow(vm: NcePlayerVm) {
         }
         Box(
             modifier = Modifier
-                .size(72.dp)
+                .size(84.dp)
                 .clip(CircleShape)
                 .background(OnDark)
                 .clickable { vm.togglePlayPause() },
@@ -558,7 +630,7 @@ private fun TransportRow(vm: NcePlayerVm) {
         ) {
             if (vm.isBuffering) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(28.dp),
+                    modifier = Modifier.size(32.dp),
                     color = ScreenBlack,
                     strokeWidth = 2.5.dp,
                 )
@@ -567,7 +639,7 @@ private fun TransportRow(vm: NcePlayerVm) {
                     if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                     contentDescription = if (vm.isPlaying) "暂停" else "播放",
                     tint = ScreenBlack,
-                    modifier = Modifier.size(34.dp),
+                    modifier = Modifier.size(40.dp),
                 )
             }
         }
@@ -691,6 +763,75 @@ internal fun LyricsTab(label: String, selected: Boolean, onClick: () -> Unit) {
             )
         }
     }
+}
+
+/**
+ * Map every VAD speech segment to the transcript lines it overlaps, so
+ * the sentence list can show actual text instead of "第 N 句" + a time
+ * range. Forced-aligned packages use real line timestamps; the rest
+ * spread the lines uniformly across the audio duration — the same
+ * approximation [LyricsLinesContent] uses. Returns one (en, cn) pair
+ * per segment.
+ */
+internal fun segmentLineTexts(
+    segments: List<SpeechSegment>,
+    lines: List<NceLine>,
+    durationMs: Long,
+): List<Pair<String, String>> {
+    if (segments.isEmpty() || lines.isEmpty() || durationMs <= 0L) return emptyList()
+    val aligned = lines.any { it.startMs >= 0 }
+    fun lineRange(i: Int): Pair<Long, Long> = when {
+        aligned -> {
+            val start = lines[i].startMs.coerceAtLeast(0L)
+            val end = lines[i].endMs.takeIf { it >= 0 }
+                ?: lines.getOrNull(i + 1)?.startMs?.takeIf { it >= 0 }
+                ?: durationMs
+            start to end
+        }
+        else -> {
+            (i.toFloat() / lines.size * durationMs).toLong() to
+                ((i + 1).toFloat() / lines.size * durationMs).toLong()
+        }
+    }
+    return segments.map { seg ->
+        var en = ""
+        var cn = ""
+        lines.forEachIndexed { i, line ->
+            val (lStart, lEnd) = lineRange(i)
+            if (minOf(seg.endMs, lEnd) - maxOf(seg.startMs, lStart) > 0) {
+                if (en.isNotEmpty()) en += "\n"
+                en += line.en
+                if (cn.isNotEmpty()) cn += "\n"
+                cn += line.cn
+            }
+        }
+        en to cn
+    }
+}
+
+/**
+ * The transcript line to show on the front face right now: prefer the
+ * VAD sentence the player sits in, falling back to the ratio/alignment
+ * approximation the lyrics view uses while speech analysis is still
+ * empty. Returns null when the lesson has no transcript at all.
+ */
+internal fun currentLineText(vm: NcePlayerVm, lesson: NceLesson): Pair<String, String>? {
+    val lines = lesson.lines
+    if (lines.isEmpty()) return null
+    val texts = segmentLineTexts(vm.speechSegments, lines, vm.durationMs)
+    val idx = vm.activeSentenceIndex
+    if (idx in texts.indices) {
+        val t = texts[idx]
+        if (t.first.isNotBlank() || t.second.isNotBlank()) return t
+    }
+    var cur = 0
+    if (lines.any { it.startMs >= 0 }) {
+        lines.forEachIndexed { i, line -> if (line.startMs in 0..vm.positionMs) cur = i }
+    } else if (vm.durationMs > 0) {
+        cur = ((vm.positionMs.toFloat() / vm.durationMs) * lines.size).toInt()
+    }
+    val line = lines[cur.coerceIn(0, lines.lastIndex)]
+    return line.en to line.cn
 }
 
 @Composable
