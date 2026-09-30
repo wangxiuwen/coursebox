@@ -131,6 +131,8 @@ class LanImportServer(
         session.method == Method.PUT && session.uri.startsWith("/raw") -> handleRaw(session)
         session.method == Method.GET && session.uri == "/status" -> handleStatus(session)
         session.method == Method.GET && session.uri == "/apk" -> serveApk()
+        session.method == Method.GET && session.uri == "/export" -> serveExportList()
+        session.method == Method.GET && session.uri.startsWith("/export/") -> serveExportPackage(session)
         else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
     }
 
@@ -207,8 +209,47 @@ class LanImportServer(
         append('"')
     }
 
-    private fun serveApk(): Response {
-        val apk = File(ctx.applicationInfo.sourceDir)
+    /** One line per installed package so a desktop can discover what it
+     *  can pull; the ids double as /export/&lt;id&gt; paths. */
+    private fun serveExportList(): Response {
+        val lines = library.state.packages.joinToString("\n") { pkg ->
+            val size = pkg.cxPaths.sumOf { File(it).length() }
+            "${pkg.id}\t${pkg.title}\t$size"
+        }
+        return newFixedLengthResponse(Response.Status.OK, "text/plain; charset=utf-8", lines)
+    }
+
+    /** Streams the package's backing .cx back to the desktop — the same
+     *  file(s) the player reads resources from, so what lands on the other
+     *  side is a valid importable package. Multi-part packs stream as the
+     *  plain concatenation the import path expects. */
+    private fun serveExportPackage(session: IHTTPSession): Response {
+        val pkgId = session.uri.removePrefix("/export/").trim()
+        val pkg = library.packageById(pkgId)
+            ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "no such package: $pkgId")
+        val parts = pkg.cxPaths.map(::File).filter { it.exists() }
+        if (parts.isEmpty()) {
+            return newFixedLengthResponse(
+                Response.Status.NOT_FOUND, "text/plain",
+                "backing .cx missing for $pkgId",
+            )
+        }
+        val resp = if (parts.size == 1) {
+            newFixedLengthResponse(
+                Response.Status.OK, "application/zip",
+                parts[0].inputStream(), parts[0].length(),
+            )
+        } else {
+            val concatenated = java.io.SequenceInputStream(
+                java.util.Collections.enumeration(parts.map { it.inputStream() }),
+            )
+            newChunkedResponse(Response.Status.OK, "application/zip", concatenated)
+        }
+        resp.addHeader("Content-Disposition", "attachment; filename=\"$pkgId.cx\"")
+        return resp
+    }
+
+    private fun serveApk(): Response {        val apk = File(ctx.applicationInfo.sourceDir)
         if (!apk.exists()) {
             return newFixedLengthResponse(
                 Response.Status.NOT_FOUND, "text/plain", "apk not found",

@@ -463,12 +463,48 @@ private fun SentenceDrillScreen(vm: NcePlayerVm, onDismiss: () -> Unit) {
     val segments = vm.speechSegments
     val lesson = vm.current
     if (segments.isEmpty() || lesson == null) return
-    val segmentTexts = remember(segments, lesson, vm.durationMs) {
-        segmentLineTexts(segments, lesson.lines, vm.durationMs)
+    // No remember(): a drill opened while durationMs/segments were still
+    // settling would cache an empty mapping and never recompute.
+    val segmentTexts = segmentLineTexts(segments, lesson.lines, vm.durationMs)
+    // The recording often opens with an announcement before the text
+    // begins (NCE audio has ~19s of "listen to the tape…"). Those VAD
+    // chunks carry no transcript, so drop them from the drill — the
+    // learner pages through actual sentences only.
+    val drillSegments = segments.indices.filter { i ->
+        val t = segmentTexts.getOrNull(i)
+        t != null && (t.first.isNotBlank() || t.second.isNotBlank())
     }
+    if (drillSegments.isEmpty()) {
+        // Lesson audio without any transcript (THINK exercise tracks):
+        // show why, instead of a black screen.
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(ScreenBlack)
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text(
+                "本课音频没有课文文本，不支持逐句模式",
+                color = OnDarkDim,
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Spacer(Modifier.height(16.dp))
+            TextButton(onClick = onDismiss) {
+                Text("返回", color = PlayerAccent, style = MaterialTheme.typography.titleMedium)
+            }
+        }
+        return
+    }
+    fun pageToSegment(page: Int): Int = drillSegments[page.coerceIn(0, drillSegments.lastIndex)]
+    val initialSegment = if (vm.activeSentenceIndex in segments.indices) {
+        vm.activeSentenceIndex
+    } else 0
     val pagerState = rememberPagerState(
-        initialPage = vm.activeSentenceIndex.coerceAtLeast(0),
-        pageCount = { segments.size },
+        initialPage = drillSegments.indexOf(initialSegment).coerceAtLeast(0),
+        pageCount = { drillSegments.size },
     )
     // Swiping drives the drill: landing on a page selects that sentence
     // (loop by default, shadowing if the toggle is on). The initial page
@@ -476,10 +512,15 @@ private fun SentenceDrillScreen(vm: NcePlayerVm, onDismiss: () -> Unit) {
     LaunchedEffect(pagerState, segments) {
         snapshotFlow { pagerState.currentPage }
             .drop(1)
-            .collect { page -> if (page in segments.indices) vm.selectSentenceForPractice(page) }
+            .collect { page ->
+                if (page in drillSegments.indices) {
+                    vm.selectSentenceForPractice(drillSegments[page])
+                }
+            }
     }
     val page = pagerState.currentPage
-    val drillingThisPage = vm.activeSentenceIndex == page &&
+    val segmentIndex = pageToSegment(page)
+    val drillingThisPage = vm.activeSentenceIndex == segmentIndex &&
         (vm.sentencePracticeMode == SentencePracticeMode.REPEAT_ONE ||
             vm.sentencePracticeMode == SentencePracticeMode.SHADOWING)
     val shadowingThisPage = drillingThisPage &&
@@ -497,7 +538,7 @@ private fun SentenceDrillScreen(vm: NcePlayerVm, onDismiss: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "第 ${page + 1} / ${segments.size} 句",
+                "第 ${page + 1} / ${drillSegments.size} 句",
                 color = OnDarkDim,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
@@ -521,7 +562,8 @@ private fun SentenceDrillScreen(vm: NcePlayerVm, onDismiss: () -> Unit) {
             state = pagerState,
             modifier = Modifier.weight(1f).fillMaxWidth(),
         ) { pageIndex ->
-            val text = segmentTexts.getOrNull(pageIndex)
+            val segIdx = drillSegments[pageIndex]
+            val text = segmentTexts.getOrNull(segIdx)
             val en = text?.first.orEmpty().trim()
             val cn = text?.second.orEmpty().trim()
             // Bigger text for shorter sentences; a merged 3-sentence
@@ -567,7 +609,7 @@ private fun SentenceDrillScreen(vm: NcePlayerVm, onDismiss: () -> Unit) {
                 }
                 Spacer(Modifier.height(20.dp))
                 Text(
-                    fmtTime(segments[pageIndex].startMs),
+                    fmtTime(segments[segIdx].startMs),
                     color = OnDarkFaint,
                     style = MaterialTheme.typography.labelMedium,
                 )
@@ -601,13 +643,13 @@ private fun SentenceDrillScreen(vm: NcePlayerVm, onDismiss: () -> Unit) {
             DrillActionButton(
                 label = if (drillingThisPage && !shadowingThisPage) "循环中" else "循环",
                 active = drillingThisPage && !shadowingThisPage,
-                onClick = { vm.toggleRepeatSentence(page) },
+                onClick = { vm.toggleRepeatSentence(segmentIndex) },
                 modifier = Modifier.weight(1f),
             )
             DrillActionButton(
                 label = if (shadowingThisPage) "跟读中" else "跟读",
                 active = shadowingThisPage,
-                onClick = { vm.setShadowingEnabled(!shadowingThisPage, page) },
+                onClick = { vm.setShadowingEnabled(!shadowingThisPage, segmentIndex) },
                 modifier = Modifier.weight(1f),
             )
         }

@@ -153,6 +153,7 @@ private fun decodeLines(node: JsonElement?): List<NceLine> {
         val o = item as? JsonObject ?: return@mapNotNull null
         val en = (o["en"] as? JsonPrimitive)?.contentOrNull
             ?: (o["english"] as? JsonPrimitive)?.contentOrNull
+            ?: (o["content"] as? JsonPrimitive)?.contentOrNull
             ?: ""
         val cn = (o["cn"] as? JsonPrimitive)?.contentOrNull
             ?: (o["chinese"] as? JsonPrimitive)?.contentOrNull
@@ -175,9 +176,15 @@ private val EN_CN_SEPARATOR = Regex("\\s*[—–]\\s*")
 private val LEADING_NUMBER = Regex("^\\s*\\d+[.、)]\\s*")
 
 private fun buildLinesFromSections(sections: List<NceSection>): List<NceLine> {
-    // Preferred shape: parallel "课文" + "翻译" sections.
-    val en = sections.firstOrNull { it.type == "text" && it.title.contains("课文") }?.text.orEmpty()
-    val cn = sections.firstOrNull { it.type == "text" && it.title.contains("翻译") }?.text.orEmpty()
+    // Preferred shape: parallel 课文 + 翻译 sections. Either may be a
+    // plain text[] of paragraphs or a dialogue[] of {sender, content}
+    // lines — NCE1's conversation lessons ship the latter.
+    fun sectionLines(s: NceSection): List<String> =
+        if (s.text.isNotEmpty()) s.text else s.dialogues.map { it.en }
+    fun usable(s: NceSection) =
+        (s.type == "text" || s.type == "dialogue") && sectionLines(s).isNotEmpty()
+    val en = sections.firstOrNull { usable(it) && it.title.contains("课文") }?.let(::sectionLines).orEmpty()
+    val cn = sections.firstOrNull { usable(it) && it.title.contains("翻译") }?.let(::sectionLines).orEmpty()
     if (en.isNotEmpty() || cn.isNotEmpty()) {
         val n = maxOf(en.size, cn.size)
         return (0 until n).map { i ->

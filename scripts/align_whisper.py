@@ -114,8 +114,11 @@ def find_audio_for_lesson(manifest: dict, lesson: dict) -> str | None:
 
 def build_lines(lesson: dict) -> list[dict]:
     """Reproduce NceLesson.kt's decode order exactly: en/cn lines win;
-    otherwise fold the 课文/翻译 sections into parallel lines; otherwise
-    split "English — 中文" rows of the first text section."""
+    otherwise fold the 课文/翻译 sections into parallel lines — text
+    sections carry a plain text[], the newer dialogue sections carry a
+    dialogue[] of {sender, content} (NCE1's second half is dialogue
+    lessons whose lines[] use sender/content and would decode empty);
+    otherwise split "English — 中文" rows of the first text section."""
     lines: list[dict] = []
     for ln in lesson.get("lines") or []:
         if not isinstance(ln, dict):
@@ -129,17 +132,25 @@ def build_lines(lesson: dict) -> list[dict]:
     if lines:
         return lines
     sections = [s for s in (lesson.get("sections") or []) if isinstance(s, dict)]
-    en = next((s.get("text") for s in sections
-               if s.get("type") == "text" and "课文" in (s.get("title") or "")), None) or []
-    cn = next((s.get("text") for s in sections
-               if s.get("type") == "text" and "翻译" in (s.get("title") or "")), None) or []
+
+    def sec_lines(s: dict) -> list[str]:
+        if s.get("type") == "text":
+            return [str(t).strip() for t in (s.get("text") or []) if str(t).strip()]
+        if s.get("type") == "dialogue":
+            return [(d.get("content") or "").strip()
+                    for d in (s.get("dialogue") or []) if isinstance(d, dict)]
+        return []
+
+    en = next((sec_lines(s) for s in sections
+               if "课文" in (s.get("title") or "")), None) or []
+    cn = next((sec_lines(s) for s in sections
+               if "翻译" in (s.get("title") or "")), None) or []
     if en or cn:
         n = max(len(en), len(cn))
-        return [{"en": str(en[i]).strip() if i < len(en) else "",
-                 "cn": str(cn[i]).strip() if i < len(cn) else "",
+        return [{"en": en[i] if i < len(en) else "",
+                 "cn": cn[i] if i < len(cn) else "",
                  "start_ms": -1, "end_ms": -1} for i in range(n)]
-    merged = next((s.get("text") for s in sections
-                   if s.get("type") == "text" and s.get("text")), None) or []
+    merged = next((sec_lines(s) for s in sections if sec_lines(s)), None) or []
     out = []
     leading_number = re.compile(r"^\s*\d+[.、)]\s*")
     for raw in merged:
@@ -377,13 +388,21 @@ def align_lesson(
     cache_dir: Path | None = None,
 ) -> bool:
     en_all, cn_all = lesson_sentence_pools(lesson)
-    if not en_all:
-        return False
     segments = refine_segment_boundaries(
         transcribe(audio_full, model, work, language, cache_dir)
     )
     if not segments:
         return False
+    if not en_all:
+        # No transcript in the package (THINK exercise/video tracks): the
+        # ASR transcript *is* the text — write whisper's sentences with
+        # their own timestamps so the drill has something to show.
+        lesson["lines"] = [
+            {"en": s["text"].strip(), "cn": "",
+             "start_ms": s["start_ms"], "end_ms": s["end_ms"]}
+            for s in segments if s["text"].strip()
+        ]
+        return bool(lesson["lines"])
     matches = align_sentences(segments, [(e, "") for e in en_all])
     spans = timestamps_for([(e, "") for e in en_all], segments, matches)
     cns = pair_chinese_by_time(
