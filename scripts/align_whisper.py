@@ -77,6 +77,28 @@ def find_object_path(manifest: dict, audio_hash: str) -> str | None:
     return None
 
 
+def find_audio_for_lesson(manifest: dict, lesson: dict) -> str | None:
+    """audio_hash if present; else match audio_local against the
+    resources' origin / lesson:<id> tag (older packages carry the audio
+    as a logical path, not an inline hash)."""
+    direct = find_object_path(manifest, lesson.get("audio_hash") or lesson.get("video_hash") or "")
+    if direct:
+        return direct
+    local = (lesson.get("audio_local") or "").strip()
+    if local.startswith("assets/"):
+        local = local[len("assets/"):]
+    lid = str(lesson.get("id") or "")
+    for r in manifest.get("resources", []):
+        origin = (r.get("origin") or "").strip()
+        if origin.startswith("assets/"):
+            origin = origin[len("assets/"):]
+        if local and (origin == local or origin.endswith("/" + local)):
+            return r.get("path")
+        if lid and f"lesson:{lid}" in (r.get("tags") or []):
+            return r.get("path")
+    return None
+
+
 # ----------------------------------------------------------------------------
 # sentence splitting — mirrors the app
 # ----------------------------------------------------------------------------
@@ -123,11 +145,21 @@ def build_lines(lesson: dict) -> list[dict]:
 def split_sentences(line: dict) -> list[tuple[str, str]]:
     """(en, cn) sentence pairs from one paragraph line. English and Chinese
     are split independently and paired by rounded index ratio — same
-    strategy as the app, so what we write is exactly what it renders."""
+    strategy as the app, so what we write is exactly what it renders.
+    Chinese fragments that are pure punctuation left over from quoted
+    speech (e.g. ”。) fold into the previous part instead of rendering
+    as garbage lines."""
     en = line.get("en") or ""
     cn = line.get("cn") or ""
     en_parts = [p.strip() for p in EN_SENTENCE_SPLIT.split(en) if p.strip()]
     cn_parts = [p.strip() for p in CN_SENTENCE_SPLIT.split(cn) if p.strip()]
+    cleaned: list[str] = []
+    for p in cn_parts:
+        if cleaned and len(re.sub(r"[\s“”„\"'‘’。！？，、；：()（）]", "", p)) < 4:
+            cleaned[-1] += p
+        else:
+            cleaned.append(p)
+    cn_parts = cleaned
     if not en_parts:
         return []
     pairs = []
@@ -356,8 +388,7 @@ def align_package(in_zip: Path, out_zip: Path, model: Path, language: str,
             if limit is not None and aligned >= limit:
                 break
             lid = lesson.get("id")
-            audio_hash = lesson.get("audio_hash") or lesson.get("video_hash") or ""
-            obj = find_object_path(manifest, audio_hash)
+            obj = find_audio_for_lesson(manifest, lesson)
             if not obj or not (unpack_dir / obj).is_file():
                 print(f"  skip {lid}: no audio object", file=sys.stderr)
                 skipped += 1
