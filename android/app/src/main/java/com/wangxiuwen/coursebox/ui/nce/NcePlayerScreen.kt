@@ -1,14 +1,14 @@
 package com.wangxiuwen.coursebox.ui.nce
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.VerticalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,6 +45,7 @@ import com.wangxiuwen.coursebox.ui.SlimSlider
 import com.wangxiuwen.coursebox.ui.fmtTime
 import com.wangxiuwen.coursebox.ui.theme.CourseTone
 import com.wangxiuwen.coursebox.ui.theme.toneFor
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 
 private val ScreenBlack = Color(0xFF000000)
@@ -65,6 +67,7 @@ fun NcePlayerScreen(
 ) {
     val scope = rememberCoroutineScope()
     val vm = remember { CourseboxApp.playerVm }
+    var showDrill by rememberSaveable { mutableStateOf(false) }
 
     var ready by remember { mutableStateOf(false) }
     LaunchedEffect(courseId, lessonId) {
@@ -108,10 +111,10 @@ fun NcePlayerScreen(
         ) {
             // Chrome
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = { nav.popBackStack() }) {
+                IconButton(onClick = { nav.popBackStack() }, modifier = Modifier.size(40.dp)) {
                     Icon(Icons.Default.KeyboardArrowDown, contentDescription = "收起", tint = OnDark)
                 }
                 Spacer(Modifier.weight(1f))
@@ -126,16 +129,34 @@ fun NcePlayerScreen(
             }
 
             if (!vm.showBack) {
-                PlayerFront(vm, lesson, tone)
+                PlayerFront(vm, lesson, tone, onOpenDrill = { showDrill = true })
             } else {
                 PlayerBackLyrics(vm, lesson, tone)
             }
+        }
+
+        // Full-screen per-sentence drill overlays everything, player
+        // chrome included. Leaving it resumes playback after the drilled
+        // sentence (same semantics the old bottom sheet had).
+        if (showDrill) {
+            SentenceDrillScreen(
+                vm = vm,
+                onDismiss = {
+                    vm.finishSentencePracticeAndContinue()
+                    showDrill = false
+                },
+            )
         }
     }
 }
 
 @Composable
-private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: CourseTone) {
+private fun ColumnScope.PlayerFront(
+    vm: NcePlayerVm,
+    lesson: NceLesson,
+    tone: CourseTone,
+    onOpenDrill: () -> Unit,
+) {
     // In landscape, fillMaxWidth + aspectRatio blows the media box past the
     // screen height (a 16:9 video on a 2400x1080 phone wants 1332px tall),
     // wiping the controls. Bind height to a fraction of the screen instead
@@ -222,7 +243,7 @@ private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: Co
         }
     }
 
-    Spacer(Modifier.height(if (isLandscape) 8.dp else 20.dp))
+    Spacer(Modifier.height(8.dp))
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -262,7 +283,7 @@ private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: Co
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 32.dp)
-            .padding(top = if (isLandscape) 6.dp else 12.dp)
+            .padding(top = 8.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(Color(0x26FFFFFF))
             .clickable { vm.setFlip(true) }
@@ -299,32 +320,34 @@ private fun ColumnScope.PlayerFront(vm: NcePlayerVm, lesson: NceLesson, tone: Co
 
     Spacer(Modifier.height(if (isLandscape) 6.dp else 10.dp))
     SliderRow(vm)
-    SentenceTransportRow(vm)
-    Spacer(Modifier.height(2.dp))
+    SentenceTransportRow(vm, onOpenDrill)
     TransportRow(vm)
-    Spacer(Modifier.weight(1f))
 }
 
 /** Audio-lesson cover: gradient square with the book watermark and the
- *  lesson number. Doubles as a giant play/pause target. */
+ *  lesson number. Doubles as a giant play/pause target. All type inside
+ *  scales with the square's side — the flexible portrait layout can
+ *  shrink the cover well below its natural size, and fixed sp sizes
+ *  would clip ("LESSON" wrapped, the number pushed out). */
 @Composable
 private fun CoverFace(lesson: NceLesson, tone: CourseTone, onClick: () -> Unit, modifier: Modifier) {
-    Box(
+    BoxWithConstraints(
         modifier = modifier
             .clickable(onClick = onClick)
             .clip(RoundedCornerShape(14.dp))
             .background(tone.gradient),
     ) {
+        val side = maxWidth
         Text(
             text = if (lesson.book in 1..4) "B${lesson.book}" else lesson.bookLabel,
             color = Color.White.copy(alpha = 0.18f),
-            fontSize = 220.sp,
+            fontSize = (side.value * 0.85f).sp,
             fontWeight = FontWeight.Black,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .offset(x = 12.dp, y = 40.dp),
+                .offset(x = side * 0.04f, y = side * 0.13f),
         )
-        Column(modifier = Modifier.fillMaxSize().padding(22.dp)) {
+        Column(modifier = Modifier.fillMaxSize().padding((side.value * 0.09f).dp)) {
             Text(
                 "LESSON",
                 color = OnDark.copy(alpha = 0.9f),
@@ -335,7 +358,7 @@ private fun CoverFace(lesson: NceLesson, tone: CourseTone, onClick: () -> Unit, 
             Text(
                 lesson.lesson.toString().padStart(2, '0'),
                 color = OnDark,
-                fontSize = 96.sp,
+                fontSize = (side.value * 0.36f).sp,
                 fontWeight = FontWeight.Black,
             )
         }
@@ -369,8 +392,7 @@ private fun SliderRow(vm: NcePlayerVm) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SentenceTransportRow(vm: NcePlayerVm) {
-    var showSentenceList by rememberSaveable { mutableStateOf(false) }
+private fun SentenceTransportRow(vm: NcePlayerVm, onOpenDrill: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp),
@@ -378,11 +400,11 @@ private fun SentenceTransportRow(vm: NcePlayerVm) {
         ) {
             TextButton(
                 modifier = Modifier.weight(1.2f),
-                onClick = { showSentenceList = true },
+                onClick = onOpenDrill,
                 enabled = vm.speechSegments.isNotEmpty(),
                 contentPadding = PaddingValues(horizontal = 2.dp),
                 colors = ButtonDefaults.textButtonColors(contentColor = OnDark),
-            ) { Text("句子", style = MaterialTheme.typography.labelLarge) }
+            ) { Text("逐句", style = MaterialTheme.typography.labelLarge) }
             TextButton(
                 modifier = Modifier.weight(1.2f),
                 onClick = vm::playPreviousSentence,
@@ -423,166 +445,248 @@ private fun SentenceTransportRow(vm: NcePlayerVm) {
             style = MaterialTheme.typography.labelSmall,
         )
     }
+}
 
-    if (showSentenceList) {
-        SentenceListSheet(
-            vm = vm,
-            onDismiss = {
-                vm.finishSentencePracticeAndContinue()
-                showSentenceList = false
+/**
+ * Full-screen per-sentence drill, entered from the player's 句子 button.
+ * Short-video mechanics: one sentence per screen, swipe up for the next,
+ * swipe down for the previous. Everything on the page serves the current
+ * sentence — oversized text (the learner's actual complaint about the
+ * old bottom-sheet list), its translation, and the practice controls.
+ * Arriving on a page selects that sentence for practice; leaving the
+ * screen resumes normal playback after the drilled sentence.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SentenceDrillScreen(vm: NcePlayerVm, onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val segments = vm.speechSegments
+    val lesson = vm.current
+    if (segments.isEmpty() || lesson == null) return
+    val segmentTexts = remember(segments, lesson, vm.durationMs) {
+        segmentLineTexts(segments, lesson.lines, vm.durationMs)
+    }
+    val pagerState = rememberPagerState(
+        initialPage = vm.activeSentenceIndex.coerceAtLeast(0),
+        pageCount = { segments.size },
+    )
+    // Swiping drives the drill: landing on a page selects that sentence
+    // (loop by default, shadowing if the toggle is on). The initial page
+    // must not re-select on entry — hence drop(1).
+    LaunchedEffect(pagerState, segments) {
+        snapshotFlow { pagerState.currentPage }
+            .drop(1)
+            .collect { page -> if (page in segments.indices) vm.selectSentenceForPractice(page) }
+    }
+    val page = pagerState.currentPage
+    val drillingThisPage = vm.activeSentenceIndex == page &&
+        (vm.sentencePracticeMode == SentencePracticeMode.REPEAT_ONE ||
+            vm.sentencePracticeMode == SentencePracticeMode.SHADOWING)
+    val shadowingThisPage = drillingThisPage &&
+        vm.sentencePracticeMode == SentencePracticeMode.SHADOWING
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ScreenBlack)
+            .statusBarsPadding()
+            .navigationBarsPadding(),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "第 ${page + 1} / ${segments.size} 句",
+                color = OnDarkDim,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 12.dp),
+            )
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = vm::reanalyzeCurrent) {
+                Text("重新分析", color = PlayerAccent, style = MaterialTheme.typography.labelMedium)
+            }
+            IconButton(onClick = onDismiss, modifier = Modifier.size(44.dp)) {
+                Icon(
+                    Icons.Default.KeyboardArrowDown,
+                    contentDescription = "退出逐句练习",
+                    tint = OnDark,
+                    modifier = Modifier.size(30.dp),
+                )
+            }
+        }
+
+        VerticalPager(
+            state = pagerState,
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+        ) { pageIndex ->
+            val text = segmentTexts.getOrNull(pageIndex)
+            val en = text?.first.orEmpty().trim()
+            val cn = text?.second.orEmpty().trim()
+            // Bigger text for shorter sentences; a merged 3-sentence
+            // segment still has to fit without becoming tiny.
+            val enSize = when {
+                en.length > 90 -> 22.sp
+                en.length > 45 -> 26.sp
+                else -> 30.sp
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 26.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                if (en.isNotBlank()) {
+                    Text(
+                        en,
+                        color = if (pageIndex == page) OnDark else OnDarkDim,
+                        fontSize = enSize,
+                        fontWeight = FontWeight.Bold,
+                        lineHeight = enSize * 1.45f,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    )
+                }
+                if (cn.isNotBlank()) {
+                    Spacer(Modifier.height(18.dp))
+                    Text(
+                        cn,
+                        color = OnDarkDim,
+                        fontSize = 17.sp,
+                        lineHeight = 26.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    )
+                }
+                if (en.isBlank() && cn.isBlank()) {
+                    Text(
+                        "（这段没有对应课文文本）",
+                        color = OnDarkFaint,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    fmtTime(segments[pageIndex].startMs),
+                    color = OnDarkFaint,
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+
+        Text(
+            when {
+                shadowingThisPage && vm.shadowingPhase == ShadowingPhase.SPEAKING ->
+                    "现在跟读，稍后自动重播这句"
+                shadowingThisPage -> "听原音，跟着读"
+                drillingThisPage -> "循环播放这句"
+                else -> "上滑下一句 · 下滑上一句"
             },
+            color = if (drillingThisPage) PlayerAccent else OnDarkFaint,
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.align(Alignment.CenterHorizontally),
         )
+        Spacer(Modifier.height(6.dp))
+        // Practice row: replay this sentence, toggle its loop, toggle
+        // shadowing — all bound to the sentence on screen.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            DrillActionButton(
+                label = "重听",
+                onClick = vm::replayCurrentSentence,
+                modifier = Modifier.weight(1f),
+            )
+            DrillActionButton(
+                label = if (drillingThisPage && !shadowingThisPage) "循环中" else "循环",
+                active = drillingThisPage && !shadowingThisPage,
+                onClick = { vm.toggleRepeatSentence(page) },
+                modifier = Modifier.weight(1f),
+            )
+            DrillActionButton(
+                label = if (shadowingThisPage) "跟读中" else "跟读",
+                active = shadowingThisPage,
+                onClick = { vm.setShadowingEnabled(!shadowingThisPage, page) },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        // Transport row: page navigation plus the global play/pause.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(
+                onClick = {
+                    if (page > 0) scope.launch { pagerState.animateScrollToPage(page - 1) }
+                },
+                enabled = page > 0,
+            ) {
+                Icon(
+                    Icons.Default.SkipPrevious,
+                    contentDescription = "上一句",
+                    tint = if (page > 0) OnDark else OnDarkFaint,
+                    modifier = Modifier.size(44.dp),
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(72.dp)
+                    .clip(CircleShape)
+                    .background(OnDark)
+                    .clickable { vm.togglePlayPause() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = if (vm.isPlaying) "暂停" else "播放",
+                    tint = ScreenBlack,
+                    modifier = Modifier.size(36.dp),
+                )
+            }
+            IconButton(
+                onClick = {
+                    if (page < segments.lastIndex) {
+                        scope.launch { pagerState.animateScrollToPage(page + 1) }
+                    }
+                },
+                enabled = page < segments.lastIndex,
+            ) {
+                Icon(
+                    Icons.Default.SkipNext,
+                    contentDescription = "下一句",
+                    tint = if (page < segments.lastIndex) OnDark else OnDarkFaint,
+                    modifier = Modifier.size(44.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SentenceListSheet(vm: NcePlayerVm, onDismiss: () -> Unit) {
-    val listState = rememberLazyListState()
-    var selectedIndex by remember {
-        mutableIntStateOf(vm.activeSentenceIndex.coerceAtLeast(0))
-    }
-    // One (en, cn) pair per VAD segment, so each row can show the actual
-    // sentence text the learner is trying to find.
-    val segmentTexts = remember(vm.speechSegments, vm.current) {
-        segmentLineTexts(vm.speechSegments, vm.current?.lines ?: emptyList(), vm.durationMs)
-    }
-    // Position once when the sheet opens. Do not observe activeSentenceIndex:
-    // tapping a row or ordinary playback must never pull that row to the top
-    // while the learner is browsing the list.
-    LaunchedEffect(Unit) {
-        if (selectedIndex in vm.speechSegments.indices) {
-            listState.scrollToItem(selectedIndex)
-        }
-    }
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF111827),
-        contentColor = OnDark,
-        dragHandle = { BottomSheetDefaults.DragHandle(color = OnDarkFaint) },
+private fun DrillActionButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    active: Boolean = false,
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (active) PlayerAccent.copy(alpha = 0.22f) else Color(0x1FFFFFFF))
+            .clickable(onClick = onClick)
+            .padding(vertical = 14.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.82f)
-                .padding(horizontal = 18.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("句子列表", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                TextButton(
-                    onClick = {
-                        onDismiss()
-                        vm.reanalyzeCurrent()
-                    },
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                ) {
-                    Text(
-                        "重新分析",
-                        color = PlayerAccent,
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
-            }
-            Text(
-                "点一句持续循环；打开跟读后仍只练这一句。关闭列表再继续下一句。",
-                style = MaterialTheme.typography.bodySmall,
-                color = OnDarkDim,
-                modifier = Modifier.padding(top = 4.dp, bottom = 10.dp),
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("跟读", fontWeight = FontWeight.Medium)
-                Spacer(Modifier.width(8.dp))
-                Switch(
-                    checked = vm.sentencePracticeMode == SentencePracticeMode.SHADOWING,
-                    onCheckedChange = { enabled ->
-                        vm.setShadowingEnabled(enabled, selectedIndex)
-                    },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = ScreenBlack,
-                        checkedTrackColor = PlayerAccent,
-                    ),
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                itemsIndexed(
-                    items = vm.speechSegments,
-                    key = { index, segment -> "${index}_${segment.startMs}" },
-                ) { index, segment ->
-                    val active = index == selectedIndex
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(
-                                if (active) PlayerAccent.copy(alpha = 0.18f)
-                                else Color.Transparent,
-                            )
-                            .clickable {
-                                selectedIndex = index
-                                vm.selectSentenceForPractice(index)
-                            }
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                "第 ${index + 1} 句 · ${fmtTime(segment.startMs)}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = OnDarkFaint,
-                                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                            )
-                            val text = segmentTexts.getOrNull(index)
-                            if (text != null && text.first.isNotBlank()) {
-                                Text(
-                                    text.first,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                                    maxLines = 3,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            if (text != null && text.second.isNotBlank()) {
-                                Text(
-                                    text.second,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = OnDarkDim,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                        if (active) {
-                            Text(
-                                when {
-                                    index != vm.activeSentenceIndex -> "已选择"
-                                    else -> when (vm.sentencePracticeMode) {
-                                    SentencePracticeMode.REPEAT_ONE -> "循环中"
-                                    SentencePracticeMode.SHADOWING -> "跟读中"
-                                    SentencePracticeMode.OFF -> "播放中"
-                                    }
-                                },
-                                color = PlayerAccent,
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold,
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(4.dp))
-                }
-                item { Spacer(Modifier.height(24.dp)) }
-            }
-        }
+        Text(
+            label,
+            color = if (active) PlayerAccent else OnDark,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 
@@ -592,7 +696,7 @@ private fun TransportRow(vm: NcePlayerVm) {
     val canPrev = vm.currentIndex > 0
     val canNext = vm.currentIndex < vm.playlist.lastIndex
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 6.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -765,13 +869,59 @@ internal fun LyricsTab(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
+// Paragraph-level transcript lines (one "line" of these packages is a
+// whole multi-sentence paragraph) must be split into sentences before
+// mapping onto VAD segments — otherwise every speech segment pulls in
+// a full paragraph and reads like the whole text. Only applied when the
+// package has no forced alignment; aligned lines are already
+// sentence-grained with real timestamps.
+private val EN_SENTENCE_SPLIT = Regex("(?<=[.!?])\\s+(?=[A-Z\"'‘“])")
+private val CN_SENTENCE_SPLIT = Regex("(?<=[。！？!?])\\s*")
+
+/** Split paragraph-sized [NceLine]s into sentence-sized ones. English
+ *  and Chinese are split independently and paired by index ratio, so a
+ *  stray unsplit quotation can't veto the whole split (the old
+ *  all-or-nothing pairing kept full paragraphs whenever counts
+ *  differed — and dialogue-heavy NCE texts trip the splitter at their
+ *  quotes). An aligned line's time range is divided evenly among its
+ *  sentences; unaligned lines stay -1 and fall back to the uniform
+ *  spread downstream. */
+internal fun expandToSentences(lines: List<NceLine>): List<NceLine> {
+    val out = mutableListOf<NceLine>()
+    for (line in lines) {
+        val en = line.en.split(EN_SENTENCE_SPLIT).filter(String::isNotBlank)
+        val cn = line.cn.split(CN_SENTENCE_SPLIT).filter(String::isNotBlank)
+        if (en.size <= 1) {
+            out.add(line)
+            continue
+        }
+        val aligned = line.startMs >= 0
+        val step = if (aligned && line.endMs > line.startMs) {
+            (line.endMs - line.startMs).toFloat() / en.size
+        } else 0f
+        en.forEachIndexed { j, sentence ->
+            val cnPart = if (cn.isEmpty()) "" else cn[
+                (j.toFloat() / en.size * cn.size + 0.5f).toInt().coerceIn(0, cn.lastIndex)
+            ]
+            out.add(
+                NceLine(
+                    en = sentence.trim(),
+                    cn = cnPart.trim(),
+                    startMs = if (aligned) line.startMs + (step * j).toLong() else -1L,
+                    endMs = if (aligned) line.startMs + (step * (j + 1)).toLong() else -1L,
+                ),
+            )
+        }
+    }
+    return if (out.size > lines.size) out else lines
+}
+
 /**
  * Map every VAD speech segment to the transcript lines it overlaps, so
- * the sentence list can show actual text instead of "第 N 句" + a time
- * range. Forced-aligned packages use real line timestamps; the rest
- * spread the lines uniformly across the audio duration — the same
- * approximation [LyricsLinesContent] uses. Returns one (en, cn) pair
- * per segment.
+ * the drill view can show actual sentence text instead of "第 N 句" + a
+ * time range. Forced-aligned packages use real line timestamps; the rest
+ * spread the (sentence-split) lines uniformly across the audio duration.
+ * Returns one (en, cn) pair per segment.
  */
 internal fun segmentLineTexts(
     segments: List<SpeechSegment>,
@@ -779,30 +929,38 @@ internal fun segmentLineTexts(
     durationMs: Long,
 ): List<Pair<String, String>> {
     if (segments.isEmpty() || lines.isEmpty() || durationMs <= 0L) return emptyList()
-    val aligned = lines.any { it.startMs >= 0 }
+    // Sentence-split first (also dividing aligned line timestamps), then
+    // decide alignment on the split result.
+    val usable = expandToSentences(lines)
+    val aligned = usable.any { it.startMs >= 0 }
+    val n = usable.size
     fun lineRange(i: Int): Pair<Long, Long> = when {
         aligned -> {
-            val start = lines[i].startMs.coerceAtLeast(0L)
-            val end = lines[i].endMs.takeIf { it >= 0 }
-                ?: lines.getOrNull(i + 1)?.startMs?.takeIf { it >= 0 }
+            val start = usable[i].startMs.coerceAtLeast(0L)
+            val end = usable[i].endMs.takeIf { it >= 0 }
+                ?: usable.getOrNull(i + 1)?.startMs?.takeIf { it >= 0 }
                 ?: durationMs
             start to end
         }
         else -> {
-            (i.toFloat() / lines.size * durationMs).toLong() to
-                ((i + 1).toFloat() / lines.size * durationMs).toLong()
+            (i.toFloat() / n * durationMs).toLong() to
+                ((i + 1).toFloat() / n * durationMs).toLong()
         }
     }
     return segments.map { seg ->
         var en = ""
         var cn = ""
-        lines.forEachIndexed { i, line ->
+        usable.forEachIndexed { i, line ->
             val (lStart, lEnd) = lineRange(i)
             if (minOf(seg.endMs, lEnd) - maxOf(seg.startMs, lStart) > 0) {
                 if (en.isNotEmpty()) en += "\n"
                 en += line.en
-                if (cn.isNotEmpty()) cn += "\n"
-                cn += line.cn
+                // Ratio pairing can hand adjacent sentences the same
+                // Chinese line; showing it twice just reads as a glitch.
+                if (line.cn.isNotBlank() && !cn.endsWith(line.cn)) {
+                    if (cn.isNotEmpty()) cn += "\n"
+                    cn += line.cn
+                }
             }
         }
         en to cn
@@ -824,13 +982,14 @@ internal fun currentLineText(vm: NcePlayerVm, lesson: NceLesson): Pair<String, S
         val t = texts[idx]
         if (t.first.isNotBlank() || t.second.isNotBlank()) return t
     }
+    val usable = expandToSentences(lines)
     var cur = 0
-    if (lines.any { it.startMs >= 0 }) {
-        lines.forEachIndexed { i, line -> if (line.startMs in 0..vm.positionMs) cur = i }
+    if (usable.any { it.startMs >= 0 }) {
+        usable.forEachIndexed { i, line -> if (line.startMs in 0..vm.positionMs) cur = i }
     } else if (vm.durationMs > 0) {
-        cur = ((vm.positionMs.toFloat() / vm.durationMs) * lines.size).toInt()
+        cur = ((vm.positionMs.toFloat() / vm.durationMs) * usable.size).toInt()
     }
-    val line = lines[cur.coerceIn(0, lines.lastIndex)]
+    val line = usable[cur.coerceIn(0, usable.lastIndex)]
     return line.en to line.cn
 }
 
