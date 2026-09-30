@@ -218,15 +218,18 @@ def pair_chinese_by_time(
 # whisper transcription
 # ----------------------------------------------------------------------------
 
-def transcribe_tokens(audio_path: Path, model: Path, work: Path, language: str,
-                      cache_dir: Path | None) -> list[dict]:
-    """Run whisper-cli once over the whole track (full JSON), return the
-    flat token list with per-token millisecond timestamps. Cache key
-    carries v3 (tokens, not sentences)."""
+def transcribe_tokens(audio_path: Path, model: Path, vad_model: Path, work: Path,
+                      language: str, cache_dir: Path | None) -> list[dict]:
+    """One whisper-cli pass with built-in Silero VAD: the audio is first
+    split on the reader's actual pauses, then each pause-boundary segment
+    is transcribed *independently* — so segment text is complete (no
+    cross-segment token drift) and segment boundaries sit on real
+    silences. Output: one entry per VAD segment with text, tokens and
+    millisecond offsets. Cache key carries v4 (VAD segments)."""
     cache_file = None
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file = cache_dir / f"{sha256_file(audio_path)}.v3.json"
+        cache_file = cache_dir / f"{sha256_file(audio_path)}.v4.json"
         if cache_file.is_file():
             return json.loads(cache_file.read_text(encoding="utf-8"))
     wav = work / "audio16k.wav"
@@ -238,7 +241,12 @@ def transcribe_tokens(audio_path: Path, model: Path, work: Path, language: str,
     out_prefix = work / "asr"
     proc = subprocess.run(
         ["whisper-cli", "-m", str(model), "-f", str(wav), "-ojf", "-of", str(out_prefix),
-         "-l", language, "-pp"],
+         "-l", language, "-pp",
+         "--vad", "--vad-model", str(vad_model),
+         "--vad-threshold", "0.5",
+         "--vad-min-silence-duration-ms", "800",
+         "--vad-min-speech-duration-ms", "180",
+         "--vad-speech-pad-ms", "100"],
         capture_output=True, text=True,
     )
     json_path = Path(f"{out_prefix}.json")
@@ -252,82 +260,30 @@ def transcribe_tokens(audio_path: Path, model: Path, work: Path, language: str,
         s, ms = rest.split(",")
         return ((int(h) * 60 + int(m)) * 60 + int(s)) * 1000 + int(ms)
 
-    tokens: list[dict] = []
+    segments: list[dict] = []
     for seg in data.get("transcription", []):
-        for tok in seg.get("tokens") or []:
-            text = tok.get("text") or ""
-            if not text.strip():
-                continue
-            tokens.append({
-                "text": text,
-                "start_ms": tok_ms(tok, "from"),
-                "end_ms": tok_ms(tok, "to"),
-            })
-    if cache_file is not None:
-        cache_file.write_text(json.dumps(tokens, ensure_ascii=False), encoding="utf-8")
-    return tokens
-
-
-def detect_speech_segments(wav: Path) -> list[tuple[int, int]]:
-    """Silence-based speech segmentation with the device player's
-    semantics: ≥800 ms of silence splits, <180 ms utterances dropped,
-    ±100 ms padding. The player no longer runs its own VAD — these are
-    the boundaries it will display and seek by, so they must sit on the
-    reader's actual pauses."""
-    proc = subprocess.run(
-        ["ffmpeg", "-i", str(wav), "-af", "silencedetect=noise=-35dB:d=0.8",
-         "-f", "null", "-"],
-        capture_output=True, text=True,
-    )
-    silences: list[list[float]] = []
-    for line in (proc.stderr or "").splitlines():
-        m = re.search(r"silence_start: ([\d.]+)", line)
-        if m:
-            silences.append([float(m.group(1)), -1.0])
+        text = (seg.get("text") or "").strip()
+        if not text:
             continue
-        m = re.search(r"silence_end: ([\d.]+)", line)
-        if m and silences and silences[-1][1] < 0:
-            silences[-1][1] = float(m.group(1))
-    total = silences[-1][1] if silences and silences[-1][1] > 0 else 0
-    if not total:
-        # Probe the real duration for the trailing-speech case.
-        out = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-             "-of", "csv=p=0", str(wav)],
-            capture_output=True, text=True,
-        )
-        try:
-            total = float(out.stdout.strip())
-        except ValueError:
-            total = 0.0
-    speech: list[tuple[float, float]] = []
-    prev = 0.0
-    for s, e in silences:
-        if s - prev >= 0.18:
-            speech.append((prev, s))
-        prev = e if e > 0 else s
-    if total - prev >= 0.18:
-        speech.append((prev, total))
-    pad = 0.1
-    return [
-        (int(max(0.0, a - pad) * 1000), int(min(total, b + pad) * 1000))
-        for a, b in speech
-    ]
+        toks = []
+        for tok in seg.get("tokens") or []:
+            t = tok.get("text") or ""
+            if t.strip():
+                toks.append({"text": t,
+                             "start_ms": tok_ms(tok, "from"),
+                             "end_ms": tok_ms(tok, "to")})
+        off = seg.get("offsets") or {}
+        segments.append({
+            "start_ms": int(off.get("from", 0)),
+            "end_ms": int(off.get("to", 0)),
+            "text": text,
+            "tokens": toks,
+        })
+    if cache_file is not None:
+        cache_file.write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
+    return segments
 
 
-def bucket_tokens_by_speech(
-    tokens: list[dict], speech: list[tuple[int, int]]
-) -> list[dict]:
-    """Group tokens into the speech segment their midpoint falls in.
-    Returns one entry per VAD segment: the segment's own boundaries
-    (the player seeks and loops by these) plus its text and tokens."""
-    out = []
-    for a, b in speech:
-        toks = [t for t in tokens if a <= (t["start_ms"] + t["end_ms"]) // 2 < b]
-        text = "".join(t["text"] for t in toks).strip()
-        if text:
-            out.append({"start_ms": a, "end_ms": b, "text": text, "tokens": toks})
-    return out
 
 
 END_PUNCT = ".!?。！？"
@@ -462,32 +418,51 @@ def timestamps_for(
 # per-lesson alignment
 # ----------------------------------------------------------------------------
 
+def tighten_span_to_text(unit_tokens: list[dict], sentence: str,
+                         start: int, end: int) -> tuple[int, int]:
+    """A matched unit can carry extra speech — e.g. an announcement glued
+    to the first sentence when the pause before the text ran under the
+    800 ms split. Slide over the unit's tokens to find the sentence's own
+    first/last word and tighten the span to them; the announcement falls
+    back out of the sentence."""
+    words = [w for w in norm(sentence).split() if w]
+    if not words or not unit_tokens:
+        return start, end
+    first_w, last_w = words[0], words[-1]
+
+    def token_core(t: dict) -> str:
+        return norm(t["text"]).strip()
+
+    start_at = end_at = None
+    for i, t in enumerate(unit_tokens):
+        core = token_core(t)
+        if not core:
+            continue
+        if start_at is None and (first_w in core or core in first_w):
+            start_at = t["start_ms"]
+        if last_w in core or (core and core in last_w):
+            end_at = t["end_ms"]
+            break_marker = i
+    if start_at is None or end_at is None or end_at < start_at:
+        return start, end
+    return max(start, start_at), min(end, max(end_at, start_at + 300))
+
+
 def align_lesson(
     lesson: dict, audio_full: Path, model: Path, work: Path, language: str,
-    cache_dir: Path | None = None,
+    cache_dir: Path | None = None, vad_model: Path | None = None,
 ) -> bool:
     en_all, cn_all = lesson_sentence_pools(lesson)
-    tokens = transcribe_tokens(audio_full, model, work, language, cache_dir)
-    if not tokens:
+    vad = vad_model or (model.parent / "ggml-silero-v5.1.2.bin")
+    segments = transcribe_tokens(audio_full, model, vad, work, language, cache_dir)
+    if not segments:
         return False
-    wav = work / "audio16k.wav"
-    if not wav.is_file():
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(audio_full),
-             "-ar", "16000", "-ac", "1", str(wav)],
-            check=True,
-        )
-    speech = detect_speech_segments(wav)
-    if not speech:
-        return False
-    buckets = bucket_tokens_by_speech(tokens, speech)
-    if not buckets:
-        return False
-    # A bucket with several sentence endings is several sentences the
-    # 800 ms pause rule couldn't split — re-split on token punctuation.
+    # A VAD segment can carry several lesson sentences when the reader's
+    # pause was shorter than the 800 ms split — re-split on token
+    # punctuation (token timestamps are accurate inside one segment).
     units: list[dict] = []
-    for b in buckets:
-        units.extend(split_bucket_on_punctuation(b))
+    for seg in segments:
+        units.extend(split_bucket_on_punctuation(seg))
 
     if not en_all:
         # No transcript in the package (THINK exercise/video tracks): the
@@ -511,6 +486,14 @@ def align_lesson(
     prev_end = 0
     for i in range(len(en_all)):
         start, end = spans[i]
+        j = matches[i]
+        if j is not None:
+            # The matched unit may carry extra speech glued to the
+            # sentence (announcement + first sentence under one pause) —
+            # tighten to where the sentence's own words actually are.
+            start, end = tighten_span_to_text(
+                units[j].get("tokens") or [], en_all[i], start, end
+            )
         start = max(start, prev_end)
         end = max(end, start + 300)
         prev_end = end

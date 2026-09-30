@@ -133,6 +133,7 @@ class LanImportServer(
         session.method == Method.GET && session.uri == "/apk" -> serveApk()
         session.method == Method.GET && session.uri == "/export" -> serveExportList()
         session.method == Method.GET && session.uri.startsWith("/export/") -> serveExportPackage(session)
+        session.method == Method.PUT && session.uri.startsWith("/lessons/") -> handleLessonsUpdate(session)
         else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
     }
 
@@ -247,6 +248,50 @@ class LanImportServer(
         }
         resp.addHeader("Content-Disposition", "attachment; filename=\"$pkgId.cx\"")
         return resp
+    }
+
+    /**
+     * Sentence-timing refresh: PUT /lessons/<package_id> with the new
+     * lessons JSON as the body. Audio objects are untouched — a full
+     * re-alignment of one course is a few hundred KB instead of 40 MB.
+     */
+    private fun handleLessonsUpdate(session: IHTTPSession): Response {
+        return try {
+            val pkgId = session.uri.removePrefix("/lessons/").trim('/')
+            if (library.packageById(pkgId) == null) {
+                return newFixedLengthResponse(
+                    Response.Status.NOT_FOUND, "text/plain", "no such package: $pkgId",
+                )
+            }
+            val total = session.headers["content-length"]?.toLongOrNull()
+                ?: return newFixedLengthResponse(
+                    Response.Status.LENGTH_REQUIRED, "text/plain", "missing Content-Length",
+                )
+            val buf = ByteArray(64 * 1024)
+            var remaining = total
+            val input = session.inputStream
+            val outBytes = java.io.ByteArrayOutputStream(maxOf(total.toInt(), 1024))
+            while (remaining > 0) {
+                val toRead = if (remaining < buf.size) remaining.toInt() else buf.size
+                val n = input.read(buf, 0, toRead)
+                if (n < 0) break
+                outBytes.write(buf, 0, n)
+                remaining -= n
+            }
+            val bytes = outBytes.toByteArray()
+            val digest = kotlinx.coroutines.runBlocking {
+                library.updateLessonsManifest(pkgId, bytes)
+            }
+            newFixedLengthResponse(
+                Response.Status.OK, "application/json",
+                """{"ok":true,"package":"$pkgId","sha256":"$digest"}""",
+            )
+        } catch (e: Throwable) {
+            Log.w(TAG, "lessons update fail", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR, "text/plain", e.message ?: "error",
+            )
+        }
     }
 
     private fun serveApk(): Response {        val apk = File(ctx.applicationInfo.sourceDir)

@@ -212,6 +212,33 @@ class CourseLibrary private constructor(
         persist()
     }
 
+    /**
+     * Sentence-timing refresh channel: replace a package's staged lessons
+     * manifest with [bytes] (the alignment pipeline's output) without
+     * touching the audio objects. Stages under a fresh digest name, points
+     * the record at it, persists. Returns the new digest.
+     */
+    suspend fun updateLessonsManifest(pkgId: String, bytes: ByteArray): String =
+        withContext(Dispatchers.IO) {
+            importMutex.withLock {
+                val pkg = packageById(pkgId)
+                    ?: error("no such package: $pkgId")
+                packagesDir.mkdirs()
+                val digest = sha256(bytes)
+                val staged = File(packagesDir, "lessons_$digest.json")
+                staged.writeBytes(bytes)
+                val old = pkg.lessonsManifestPath
+                val updated = pkg.copy(lessonsManifestPath = staged.absolutePath)
+                stateFlow.value = state.copy(
+                    packages = state.packages.map { if (it.id == pkgId) updated else it }
+                )
+                persist()
+                val stillUsed = state.packages.any { it.lessonsManifestPath == old }
+                if (!stillUsed) File(old).delete()
+                digest
+            }
+        }
+
     /** Read a logical-path resource as text. Returns null if not imported. */
     suspend fun loadString(logicalPath: String): String? = withContext(Dispatchers.IO) {
         val p = resolveLogicalPath(logicalPath) ?: return@withContext null
