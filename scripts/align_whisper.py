@@ -33,6 +33,7 @@ External deps: whisper-cli, ffmpeg (on PATH).
 from __future__ import annotations
 
 import argparse
+import bisect
 import difflib
 import hashlib
 import json
@@ -62,6 +63,14 @@ def check_bins() -> None:
 
 def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+
+def sha256_file(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def norm(s: str) -> str:
@@ -142,14 +151,11 @@ def build_lines(lesson: dict) -> list[dict]:
     return out
 
 
-def lesson_sentences(lesson: dict) -> list[tuple[str, str]]:
-    """(en, cn) sentence pairs for the whole lesson. English and Chinese
-    are pooled across the lesson and paired by rounded global index —
-    pairing within a paragraph misaligns badly when a paragraph's
+def lesson_sentence_pools(lesson: dict) -> tuple[list[str], list[str]]:
+    """All English / Chinese sentences of the lesson, in order. Pooling is
+    global: pairing within a paragraph misaligns badly when a paragraph's
     translation splits into a different number of sentences (NCE
-    translations are free paraphrases; an 11-sentence English paragraph
-    against a 5-sentence translation used to stack the first sentences
-    all onto the translation's first line)."""
+    translations are free paraphrases)."""
     lines = build_lines(lesson)
     en_all: list[str] = []
     cn_all: list[str] = []
@@ -164,17 +170,37 @@ def lesson_sentences(lesson: dict) -> list[tuple[str, str]]:
             folded[-1] += p
         else:
             folded.append(p)
-    cn_all = folded
-    n, m = len(en_all), len(cn_all)
-    if n == 0:
-        return []
-    return [
-        (
-            en_all[j],
-            cn_all[min(int(j / n * m + 0.5), m - 1)] if m else "",
-        )
-        for j in range(n)
-    ]
+    return en_all, folded
+
+
+def pair_chinese_by_time(
+    en_timed: list[tuple[str, int, int]], cn_all: list[str]
+) -> list[str]:
+    """One Chinese sentence per English sentence. The translations are laid
+    over the lesson's [first_start, last_end] span weighted by character
+    count (translation length ≈ spoken duration, even for free
+    translations), and each English sentence takes the translation its
+    midpoint falls into. Index-ratio pairing stacked the first sentences
+    onto the translation's first line; this follows the actual timings."""
+    if not cn_all:
+        return [""] * len(en_timed)
+    weights = [max(len(c), 1) for c in cn_all]
+    total = sum(weights)
+    t0 = en_timed[0][1]
+    t1 = max(e for _, _, e in en_timed)
+    span = max(t1 - t0, 1)
+    bounds = [t0]
+    acc = 0
+    for w in weights:
+        acc += w
+        bounds.append(t0 + span * acc / total)
+    out = []
+    for _, s, e in en_timed:
+        mid = (s + e) / 2
+        k = bisect.bisect_right(bounds, mid) - 1
+        k = min(max(k, 0), len(cn_all) - 1)
+        out.append(cn_all[k])
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -350,19 +376,22 @@ def align_lesson(
     lesson: dict, audio_full: Path, model: Path, work: Path, language: str,
     cache_dir: Path | None = None,
 ) -> bool:
-    text_pairs = lesson_sentences(lesson)
-    if not text_pairs:
+    en_all, cn_all = lesson_sentence_pools(lesson)
+    if not en_all:
         return False
     segments = refine_segment_boundaries(
         transcribe(audio_full, model, work, language, cache_dir)
     )
     if not segments:
         return False
-    matches = align_sentences(segments, text_pairs)
-    spans = timestamps_for(text_pairs, segments, matches)
+    matches = align_sentences(segments, [(e, "") for e in en_all])
+    spans = timestamps_for([(e, "") for e in en_all], segments, matches)
+    cns = pair_chinese_by_time(
+        [(e, s, e2) for e, (s, e2) in zip(en_all, spans)], cn_all
+    )
     lesson["lines"] = [
-        {"en": en, "cn": cn, "start_ms": spans[i][0], "end_ms": spans[i][1]}
-        for i, (en, cn) in enumerate(text_pairs)
+        {"en": en_all[i], "cn": cns[i], "start_ms": spans[i][0], "end_ms": spans[i][1]}
+        for i in range(len(en_all))
     ]
     return True
 
@@ -384,6 +413,23 @@ def align_package(in_zip: Path, out_zip: Path, model: Path, language: str,
         unpack_dir.mkdir()
         with zipfile.ZipFile(in_zip, "r") as zf:
             zf.extractall(unpack_dir)
+        _align_in_dir(unpack_dir, out_zip, model, language, course_id, limit, cache_dir)
+
+
+def align_dir(unpack_dir: Path, out_zip: Path, model: Path, language: str,
+              course_id: str | None, limit: int | None,
+              cache_dir: Path | None = None) -> None:
+    """Package already unpacked (multi-part packs: unzip every part into
+    the same directory — each part is its own zip; manifest comes from
+    the first, objects merge)."""
+    _align_in_dir(unpack_dir, out_zip, model, language, course_id, limit, cache_dir)
+
+
+def _align_in_dir(unpack_dir: Path, out_zip: Path, model: Path, language: str,
+                  course_id: str | None, limit: int | None,
+                  cache_dir: Path | None) -> None:
+    with tempfile.TemporaryDirectory(prefix="align-whisper-work-") as td:
+        tmp = Path(td)
 
         manifest_path = unpack_dir / "manifest.json"
         if not manifest_path.is_file():
@@ -455,20 +501,28 @@ def align_package(in_zip: Path, out_zip: Path, model: Path, language: str,
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("input", type=Path)
+    ap.add_argument("input", type=Path, nargs="?", default=None,
+                    help="input .cx/.zip (not needed with --from-dir)")
     ap.add_argument("output", type=Path)
     ap.add_argument("--model", type=Path,
                     default=Path.home() / "models/whisper/ggml-large-v3-turbo-q5_0.bin")
     ap.add_argument("--course", default=None, help="course id (default: first course)")
     ap.add_argument("--limit", type=int, default=None, help="align only the first N lessons")
     ap.add_argument("--language", default="en")
+    ap.add_argument("--from-dir", type=Path, default=None,
+                    help="align an already-unpacked package directory "
+                         "(multi-part packs: all parts unzipped together)")
     ap.add_argument("--cache-dir", type=Path,
                     default=Path.home() / ".cache/align-whisper",
                     help="whisper transcript cache (empty string disables)")
     args = ap.parse_args()
     check_bins()
-    align_package(args.input, args.output, args.model, args.language,
+    if args.from_dir:
+        align_dir(args.from_dir, args.output, args.model, args.language,
                   args.course, args.limit, args.cache_dir or None)
+    else:
+        align_package(args.input, args.output, args.model, args.language,
+                      args.course, args.limit, args.cache_dir or None)
 
 
 if __name__ == "__main__":
