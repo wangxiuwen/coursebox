@@ -511,7 +511,10 @@ class LanImportServer(
 
     private fun handleRaw(session: IHTTPSession): Response {
         return try {
-            val name = session.parameters["name"]?.firstOrNull()
+            // PUT /raw/<filename> keeps the real name (multipart parts are
+            // claimed by filename); ?name= is the older spelling.
+            val name = session.uri.removePrefix("/raw").trim('/').takeIf { it.isNotEmpty() }
+                ?: session.parameters["name"]?.firstOrNull()
                 ?: "lan-import-${System.currentTimeMillis()}.zip"
             // NanoHTTPD's `inputStream` is the raw socket stream — it is NOT
             // capped at Content-Length, so `copyTo` would read forever and
