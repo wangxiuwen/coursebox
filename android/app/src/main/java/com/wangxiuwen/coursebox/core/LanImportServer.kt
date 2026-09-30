@@ -501,7 +501,13 @@ class LanImportServer(
                 Response.Status.BAD_REQUEST, "text/plain", "missing file part",
             )
             val originalName = session.parameters["file"]?.firstOrNull() ?: "import.zip"
-            val id = beginImport(File(tmpPath), originalName)
+            // NanoHTTPD deletes its temp files when the request handler
+            // returns, but the import runs async — copy into our own cache
+            // first or the importer races a deleted file ("source file
+            // doesn't exist").
+            val safeCopy = File(ctx.cacheDir, "upload-${java.util.UUID.randomUUID()}.zip")
+            File(tmpPath).copyTo(safeCopy, overwrite = true)
+            val id = beginImport(safeCopy, originalName)
             newFixedLengthResponse(Response.Status.OK, "application/json", """{"id":"$id"}""")
         } catch (e: Throwable) {
             Log.w(TAG, "multipart fail", e)
