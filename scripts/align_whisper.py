@@ -1,35 +1,4 @@
 #!/usr/bin/env python3
-"""
-Forced-align NCE-style lesson audio to per-sentence start_ms/end_ms using
-local whisper.cpp ASR — the follow-up to align_lessons.py.
-
-Why not aeneas: these packages carry *paragraph*-sized transcript lines
-(one "line" = several sentences, and dialogue quotes break naive sentence
-pairing), so aeneas's line-level alignment still leaves the player
-averaging inside a paragraph. Whisper gives real sentence-level timings;
-we fuzzy-match its transcript against the lesson text (the recording and
-the text edition differ) and write one sentence per line entry.
-
-Per lesson:
-  1. ffmpeg → 16 kHz mono wav
-  2. whisper-cli (-oj) → sentence segments with timestamps
-  3. split lesson paragraphs into sentences (same regexes as the app)
-  4. Needleman–Wunsch align ASR sentences ↔ text sentences on
-     normalised text (SequenceMatcher ratio)
-  5. matched sentences take the ASR timestamps; unmatched ones are
-     interpolated between their matched neighbours
-  6. lines[] is replaced with sentence-grained entries (en, cn, start_ms,
-     end_ms); Chinese pairs by rounded index ratio, like the app does
-
-The lessons manifest is re-hashed and the package repacked exactly like
-align_lessons.py does.
-
-Usage:
-    align_whisper.py <input.cx|.zip> <output.cx> \
-        [--model ggml-*.bin] [--course <id>] [--limit N] [--language en]
-
-External deps: whisper-cli, ffmpeg (on PATH).
-"""
 from __future__ import annotations
 
 import argparse
@@ -47,11 +16,11 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-# Same sentence splitters as NcePlayerScreen.expandToSentences.
+
+
+# Sentence splitters — same regexes as NcePlayerScreen.expandToSentences.
 EN_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'‘“])")
 CN_SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?])\s*")
-
-# Normalise for matching: letters/digits/space only, lowercased.
 _NORM_RE = re.compile(r"[^a-z0-9 ]+")
 
 
@@ -263,24 +232,33 @@ def detect_speech_segments(wav: Path) -> list[tuple[float, float]]:
 def start_whisper_server(model: Path, port: int) -> subprocess.Popen:
     """Long-lived whisper.cpp HTTP server: the 547 MB model loads once and
     every VAD segment then transcribes in a fraction of a second —
-    per-segment whisper-cli calls would each pay a 2-3 s model load."""
-    proc = subprocess.Popen(
-        ["/opt/homebrew/bin/whisper-server", "-m", str(model),
-         "--port", str(port), "--inference-path", "/inference"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    per-segment whisper-cli calls would each pay a 2-3 s model load.
+    Retries on the next port if one is held by a stale server — a dead
+    server behind a live port used to poison every subsequent lesson."""
     import time
-    for _ in range(60):
-        time.sleep(0.5)
-        try:
-            import urllib.request
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1)
-            return proc
-        except Exception:
+    import urllib.request
+    for attempt in range(10):
+        candidate = port + attempt
+        proc = subprocess.Popen(
+            ["/opt/homebrew/bin/whisper-server", "-m", str(model),
+             "--port", str(candidate), "--inference-path", "/inference"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        ok = False
+        for _ in range(60):
+            time.sleep(0.5)
             if proc.poll() is not None:
+                break  # died (port held?) — try the next port
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{candidate}/", timeout=1)
+                ok = True
                 break
-    proc.kill()
-    sys.exit("whisper-server failed to start")
+            except Exception:
+                continue
+        if ok and proc.poll() is None:
+            return proc, candidate
+        proc.kill()
+    sys.exit("whisper-server failed to start on any port 9100-9109")
 
 
 def stop_whisper_server(proc: subprocess.Popen) -> None:
@@ -307,7 +285,12 @@ def transcribe_segments(wav: Path, speech: list[tuple[float, float]],
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file = cache_dir / f"{cache_key}.v5.json"
         if cache_file.is_file():
-            return json.loads(cache_file.read_text(encoding="utf-8"))
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            # An empty result is a poison pill from a failed run (dead
+            # server, missing import...) — treat it as a miss so the
+            # lesson can ever recover.
+            if cached:
+                return cached
 
     special = re.compile(r"^_.*_$|^\[.*\]$")
 
@@ -345,7 +328,7 @@ def transcribe_segments(wav: Path, speech: list[tuple[float, float]],
             "end_ms": int(b * 1000),
             "text": text,
         })
-    if cache_file is not None:
+    if cache_file is not None and units:
         cache_file.write_text(json.dumps(units, ensure_ascii=False), encoding="utf-8")
     return units
 
@@ -601,10 +584,10 @@ def align_dir(unpack_dir: Path, out_zip: Path, model: Path, language: str,
 def _align_in_dir(unpack_dir: Path, out_zip: Path, model: Path, language: str,
                   course_id: str | None, limit: int | None,
                   cache_dir: Path | None) -> None:
-    server = start_whisper_server(model, 9100)
+    server, server_port = start_whisper_server(model, 9100)
     try:
         _run_alignment(unpack_dir, out_zip, model, language, course_id,
-                       limit, cache_dir, 9100)
+                       limit, cache_dir, server_port)
     finally:
         stop_whisper_server(server)
 
@@ -626,6 +609,7 @@ def _run_alignment(unpack_dir: Path, out_zip: Path, model: Path, language: str,
         if not old_lessons_path:
             sys.exit("course is missing lessons_manifest")
         lessons = json.loads((unpack_dir / old_lessons_path).read_text(encoding="utf-8"))
+        print(f"DEBUG: lessons {len(lessons)}, 前3: {[l.get('id') for l in lessons[:3]]}", flush=True)
 
         aligned = skipped = 0
         for lesson in lessons:
