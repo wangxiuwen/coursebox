@@ -142,46 +142,56 @@ def build_lines(lesson: dict) -> list[dict]:
     return out
 
 
-def split_sentences(line: dict) -> list[tuple[str, str]]:
-    """(en, cn) sentence pairs from one paragraph line. English and Chinese
-    are split independently and paired by rounded index ratio — same
-    strategy as the app, so what we write is exactly what it renders.
-    Chinese fragments that are pure punctuation left over from quoted
-    speech (e.g. ”。) fold into the previous part instead of rendering
-    as garbage lines."""
-    en = line.get("en") or ""
-    cn = line.get("cn") or ""
-    en_parts = [p.strip() for p in EN_SENTENCE_SPLIT.split(en) if p.strip()]
-    cn_parts = [p.strip() for p in CN_SENTENCE_SPLIT.split(cn) if p.strip()]
-    cleaned: list[str] = []
-    for p in cn_parts:
-        if cleaned and len(re.sub(r"[\s“”„\"'‘’。！？，、；：()（）]", "", p)) < 4:
-            cleaned[-1] += p
-        else:
-            cleaned.append(p)
-    cn_parts = cleaned
-    if not en_parts:
-        return []
-    pairs = []
-    for j, e in enumerate(en_parts):
-        c = cn_parts[min(int(j / len(en_parts) * len(cn_parts) + 0.5), len(cn_parts) - 1)] if cn_parts else ""
-        pairs.append((e, c))
-    return pairs
-
-
 def lesson_sentences(lesson: dict) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-    for ln in build_lines(lesson):
-        pairs.extend(split_sentences(ln))
-    return pairs
+    """(en, cn) sentence pairs for the whole lesson. English and Chinese
+    are pooled across the lesson and paired by rounded global index —
+    pairing within a paragraph misaligns badly when a paragraph's
+    translation splits into a different number of sentences (NCE
+    translations are free paraphrases; an 11-sentence English paragraph
+    against a 5-sentence translation used to stack the first sentences
+    all onto the translation's first line)."""
+    lines = build_lines(lesson)
+    en_all: list[str] = []
+    cn_all: list[str] = []
+    for ln in lines:
+        en_all += [p.strip() for p in EN_SENTENCE_SPLIT.split(ln.get("en") or "") if p.strip()]
+        cn_all += [p.strip() for p in CN_SENTENCE_SPLIT.split(ln.get("cn") or "") if p.strip()]
+    # Fold pure-punctuation leftovers (quoted-speech ”。) into the
+    # previous translation.
+    folded: list[str] = []
+    for p in cn_all:
+        if folded and len(re.sub(r"[\s“”„\"'‘’。！？，、；：()（）]", "", p)) < 4:
+            folded[-1] += p
+        else:
+            folded.append(p)
+    cn_all = folded
+    n, m = len(en_all), len(cn_all)
+    if n == 0:
+        return []
+    return [
+        (
+            en_all[j],
+            cn_all[min(int(j / n * m + 0.5), m - 1)] if m else "",
+        )
+        for j in range(n)
+    ]
 
 
 # ----------------------------------------------------------------------------
 # whisper transcription
 # ----------------------------------------------------------------------------
 
-def transcribe(audio_path: Path, model: Path, work: Path, language: str) -> list[dict]:
-    """Run whisper-cli, return [{'start_ms','end_ms','text'}]."""
+def transcribe(audio_path: Path, model: Path, work: Path, language: str,
+               cache_dir: Path | None) -> list[dict]:
+    """Run whisper-cli, return [{'start_ms','end_ms','text'}]. Results are
+    cached by audio content hash — re-running the alignment to tweak
+    pairing/matching skips the (expensive) transcription."""
+    cache_file = None
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / f"{sha256_file(audio_path)}.json"
+        if cache_file.is_file():
+            return json.loads(cache_file.read_text(encoding="utf-8"))
     wav = work / "audio16k.wav"
     subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", str(audio_path),
@@ -212,6 +222,8 @@ def transcribe(audio_path: Path, model: Path, work: Path, language: str) -> list
         start = to_ms(seg["timestamps"]["from"])
         end = to_ms(seg["timestamps"]["to"])
         segments.append({"start_ms": start, "end_ms": end, "text": text})
+    if cache_file is not None:
+        cache_file.write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
     return segments
 
 
@@ -335,12 +347,15 @@ def timestamps_for(
 # ----------------------------------------------------------------------------
 
 def align_lesson(
-    lesson: dict, audio_full: Path, model: Path, work: Path, language: str
+    lesson: dict, audio_full: Path, model: Path, work: Path, language: str,
+    cache_dir: Path | None = None,
 ) -> bool:
     text_pairs = lesson_sentences(lesson)
     if not text_pairs:
         return False
-    segments = refine_segment_boundaries(transcribe(audio_full, model, work, language))
+    segments = refine_segment_boundaries(
+        transcribe(audio_full, model, work, language, cache_dir)
+    )
     if not segments:
         return False
     matches = align_sentences(segments, text_pairs)
@@ -357,7 +372,8 @@ def align_lesson(
 # ----------------------------------------------------------------------------
 
 def align_package(in_zip: Path, out_zip: Path, model: Path, language: str,
-                  course_id: str | None, limit: int | None) -> None:
+                  course_id: str | None, limit: int | None,
+                  cache_dir: Path | None = None) -> None:
     if not in_zip.is_file():
         sys.exit(f"input zip not found: {in_zip}")
     out_zip.parent.mkdir(parents=True, exist_ok=True)
@@ -396,7 +412,7 @@ def align_package(in_zip: Path, out_zip: Path, model: Path, language: str,
             work = tmp / f"work-{lid}"
             work.mkdir(exist_ok=True)
             try:
-                ok = align_lesson(lesson, unpack_dir / obj, model, work, language)
+                ok = align_lesson(lesson, unpack_dir / obj, model, work, language, cache_dir)
             except Exception as exc:
                 print(f"  fail {lid}: {exc}", file=sys.stderr)
                 ok = False
@@ -446,10 +462,13 @@ def main() -> None:
     ap.add_argument("--course", default=None, help="course id (default: first course)")
     ap.add_argument("--limit", type=int, default=None, help="align only the first N lessons")
     ap.add_argument("--language", default="en")
+    ap.add_argument("--cache-dir", type=Path,
+                    default=Path.home() / ".cache/align-whisper",
+                    help="whisper transcript cache (empty string disables)")
     args = ap.parse_args()
     check_bins()
     align_package(args.input, args.output, args.model, args.language,
-                  args.course, args.limit)
+                  args.course, args.limit, args.cache_dir or None)
 
 
 if __name__ == "__main__":
