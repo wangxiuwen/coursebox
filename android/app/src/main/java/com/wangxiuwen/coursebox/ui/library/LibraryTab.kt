@@ -112,6 +112,34 @@ fun LibraryTab(
             importing = false
         }
     }
+    // Sentence-timing pack (from the alignment pipeline, shared via
+    // WeChat etc.): {"<package_id>": [lessons...], ...} — swaps each
+    // package's staged lessons manifest without touching audio.
+    val sentencePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            importing = true
+            status = "同步句子数据…"
+            runCatching {
+                val text = ctx.contentResolver.openInputStream(uri)!!.use {
+                    it.readBytes().decodeToString()
+                }
+                val obj = org.json.JSONObject(text)
+                val done = mutableListOf<String>()
+                for (key in obj.keys()) {
+                    val bytes = obj.getJSONArray(key).toString().toByteArray()
+                    library.updateLessonsManifest(key, bytes)
+                    done += key
+                }
+                done
+            }.onSuccess { done ->
+                status = "句子数据已同步：${done.joinToString("、")}"
+            }.onFailure { e -> status = "同步失败：${e.message}" }
+            importing = false
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize().background(PaperBg).statusBarsPadding()) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -241,6 +269,20 @@ fun LibraryTab(
                                 // those that don't surface a MIME for the
                                 // extension yet.
                                 picker.launch(arrayOf("application/zip", "*/*"))
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("导入句子数据") },
+                            leadingIcon = {
+                                Icon(Icons.Default.FileDownload, null, tint = Color.Black)
+                            },
+                            colors = MenuDefaults.itemColors(
+                                textColor = Color.Black,
+                                leadingIconColor = Color.Black,
+                            ),
+                            onClick = {
+                                menuOpen = false
+                                sentencePicker.launch(arrayOf("*/*"))
                             },
                         )
                         DropdownMenuItem(
