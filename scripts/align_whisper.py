@@ -220,13 +220,16 @@ def pair_chinese_by_time(
 
 def transcribe(audio_path: Path, model: Path, work: Path, language: str,
                cache_dir: Path | None) -> list[dict]:
-    """Run whisper-cli, return [{'start_ms','end_ms','text'}]. Results are
-    cached by audio content hash — re-running the alignment to tweak
-    pairing/matching skips the (expensive) transcription."""
+    """Run whisper-cli (full JSON for token timestamps), return sentence
+    list with token-accurate boundaries: sentences split where a token
+    ends with sentence punctuation, start/end taken from the first/last
+    token's own timestamps. Splitting a segment by character share used
+    to drift 1-2 s on unevenly-read sentences — the learner heard one
+    sentence while the screen showed another. Cache key carries v2."""
     cache_file = None
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file = cache_dir / f"{sha256_file(audio_path)}.json"
+        cache_file = cache_dir / f"{sha256_file(audio_path)}.v2.json"
         if cache_file.is_file():
             return json.loads(cache_file.read_text(encoding="utf-8"))
     wav = work / "audio16k.wav"
@@ -237,7 +240,7 @@ def transcribe(audio_path: Path, model: Path, work: Path, language: str,
     )
     out_prefix = work / "asr"
     proc = subprocess.run(
-        ["whisper-cli", "-m", str(model), "-f", str(wav), "-oj", "-of", str(out_prefix),
+        ["whisper-cli", "-m", str(model), "-f", str(wav), "-ojf", "-of", str(out_prefix),
          "-l", language, "-pp"],
         capture_output=True, text=True,
     )
@@ -246,22 +249,41 @@ def transcribe(audio_path: Path, model: Path, work: Path, language: str,
         sys.exit(f"whisper-cli produced no json (rc={proc.returncode}):\n{proc.stderr[-2000:]}")
     data = json.loads(json_path.read_text(encoding="utf-8"))
 
-    segments = []
+    def tok_ms(tok: dict, key: str) -> int:
+        stamp = tok["timestamps"][key]
+        h, m, rest = stamp.split(":")
+        s, ms = rest.split(",")
+        return ((int(h) * 60 + int(m)) * 60 + int(s)) * 1000 + int(ms)
+
+    end_punct = ".!?。！？"
+    sentences: list[dict] = []
+    cur: list[dict] = []
     for seg in data.get("transcription", []):
-        text = (seg.get("text") or "").strip()
-        if not text:
-            continue
-        # whisper timestamps "00:00:01,240" → ms
-        def to_ms(stamp: str) -> int:
-            h, m, rest = stamp.split(":")
-            s, ms = rest.split(",")
-            return ((int(h) * 60 + int(m)) * 60 + int(s)) * 1000 + int(ms)
-        start = to_ms(seg["timestamps"]["from"])
-        end = to_ms(seg["timestamps"]["to"])
-        segments.append({"start_ms": start, "end_ms": end, "text": text})
+        for tok in seg.get("tokens") or []:
+            text = tok.get("text") or ""
+            if not text:
+                continue
+            cur.append(tok)
+            if text.strip().rstrip("”’\"'“‘）)…").endswith(tuple(end_punct)):
+                sentence = "".join(t["text"] for t in cur).strip()
+                if sentence:
+                    sentences.append({
+                        "start_ms": tok_ms(cur[0], "from"),
+                        "end_ms": tok_ms(cur[-1], "to"),
+                        "text": sentence,
+                    })
+                cur = []
+    if cur:
+        sentence = "".join(t["text"] for t in cur).strip()
+        if sentence:
+            sentences.append({
+                "start_ms": tok_ms(cur[0], "from"),
+                "end_ms": tok_ms(cur[-1], "to"),
+                "text": sentence,
+            })
     if cache_file is not None:
-        cache_file.write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
-    return segments
+        cache_file.write_text(json.dumps(sentences, ensure_ascii=False), encoding="utf-8")
+    return sentences
 
 
 def refine_segment_boundaries(segments: list[dict]) -> list[dict]:
@@ -388,9 +410,7 @@ def align_lesson(
     cache_dir: Path | None = None,
 ) -> bool:
     en_all, cn_all = lesson_sentence_pools(lesson)
-    segments = refine_segment_boundaries(
-        transcribe(audio_full, model, work, language, cache_dir)
-    )
+    segments = transcribe(audio_full, model, work, language, cache_dir)
     if not segments:
         return False
     if not en_all:
@@ -408,10 +428,19 @@ def align_lesson(
     cns = pair_chinese_by_time(
         [(e, s, e2) for e, (s, e2) in zip(en_all, spans)], cn_all
     )
-    lesson["lines"] = [
-        {"en": en_all[i], "cn": cns[i], "start_ms": spans[i][0], "end_ms": spans[i][1]}
-        for i in range(len(en_all))
-    ]
+    # Enforce monotonic, non-overlapping spans: interpolation between
+    # anchors can hand a sentence a start before its neighbour's end,
+    # which makes the player's current-sentence probe flicker.
+    lines = []
+    prev_end = 0
+    for i in range(len(en_all)):
+        start, end = spans[i]
+        start = max(start, prev_end)
+        end = max(end, start + 300)
+        prev_end = end
+        lines.append({"en": en_all[i], "cn": cns[i],
+                      "start_ms": start, "end_ms": end})
+    lesson["lines"] = lines
     return True
 
 
