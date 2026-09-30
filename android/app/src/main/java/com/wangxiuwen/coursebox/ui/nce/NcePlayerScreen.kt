@@ -545,8 +545,13 @@ private fun SentenceDrillScreen(vm: NcePlayerVm, onDismiss: () -> Unit) {
                 modifier = Modifier.padding(horizontal = 12.dp),
             )
             Spacer(Modifier.weight(1f))
-            TextButton(onClick = vm::reanalyzeCurrent) {
-                Text("重新分析", color = PlayerAccent, style = MaterialTheme.typography.labelMedium)
+            // Re-analyze only makes sense for lessons without baked-in
+            // sentence timestamps — aligned packages are the source of
+            // truth and have nothing to re-analyze.
+            if (lesson.lines.none { it.startMs >= 0 }) {
+                TextButton(onClick = vm::reanalyzeCurrent) {
+                    Text("重新分析", color = PlayerAccent, style = MaterialTheme.typography.labelMedium)
+                }
             }
             IconButton(onClick = onDismiss, modifier = Modifier.size(44.dp)) {
                 Icon(

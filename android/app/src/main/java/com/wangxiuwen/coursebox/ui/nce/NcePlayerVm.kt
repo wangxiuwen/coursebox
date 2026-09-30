@@ -507,6 +507,19 @@ class NcePlayerVm(context: Context) : ViewModel() {
         speechSegments = emptyList()
         activeSentenceIndex = -1
         val expectedIndex = currentIndex
+        // Aligned packages carry per-sentence timestamps in the lesson
+        // itself — the boundaries were baked in at package build time, so
+        // skip on-device analysis entirely: no wait, no VAD, and the
+        // drill's seek/loop boundaries are exactly the published ones.
+        val lines = playlist.getOrNull(expectedIndex)?.lines.orEmpty()
+        if (lines.any { it.startMs >= 0 }) {
+            speechSegments = lines
+                .filter { it.startMs >= 0 }
+                .map { SpeechSegment(it.startMs, it.endMs) }
+            sentenceAnalysisState = SentenceAnalysisState.READY
+            activeSentenceIndex = segmentAtOrBefore(player.currentPosition)
+            return
+        }
         val mediaPath = resolvedPaths.getOrNull(expectedIndex)
         if (mediaPath.isNullOrBlank()) {
             sentenceAnalysisState = SentenceAnalysisState.FAILED

@@ -218,18 +218,15 @@ def pair_chinese_by_time(
 # whisper transcription
 # ----------------------------------------------------------------------------
 
-def transcribe(audio_path: Path, model: Path, work: Path, language: str,
-               cache_dir: Path | None) -> list[dict]:
-    """Run whisper-cli (full JSON for token timestamps), return sentence
-    list with token-accurate boundaries: sentences split where a token
-    ends with sentence punctuation, start/end taken from the first/last
-    token's own timestamps. Splitting a segment by character share used
-    to drift 1-2 s on unevenly-read sentences — the learner heard one
-    sentence while the screen showed another. Cache key carries v2."""
+def transcribe_tokens(audio_path: Path, model: Path, work: Path, language: str,
+                      cache_dir: Path | None) -> list[dict]:
+    """Run whisper-cli once over the whole track (full JSON), return the
+    flat token list with per-token millisecond timestamps. Cache key
+    carries v3 (tokens, not sentences)."""
     cache_file = None
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file = cache_dir / f"{sha256_file(audio_path)}.v2.json"
+        cache_file = cache_dir / f"{sha256_file(audio_path)}.v3.json"
         if cache_file.is_file():
             return json.loads(cache_file.read_text(encoding="utf-8"))
     wav = work / "audio16k.wav"
@@ -255,55 +252,115 @@ def transcribe(audio_path: Path, model: Path, work: Path, language: str,
         s, ms = rest.split(",")
         return ((int(h) * 60 + int(m)) * 60 + int(s)) * 1000 + int(ms)
 
-    end_punct = ".!?。！？"
-    sentences: list[dict] = []
-    cur: list[dict] = []
+    tokens: list[dict] = []
     for seg in data.get("transcription", []):
         for tok in seg.get("tokens") or []:
             text = tok.get("text") or ""
-            if not text:
+            if not text.strip():
                 continue
-            cur.append(tok)
-            if text.strip().rstrip("”’\"'“‘）)…").endswith(tuple(end_punct)):
-                sentence = "".join(t["text"] for t in cur).strip()
-                if sentence:
-                    sentences.append({
-                        "start_ms": tok_ms(cur[0], "from"),
-                        "end_ms": tok_ms(cur[-1], "to"),
-                        "text": sentence,
-                    })
-                cur = []
-    if cur:
-        sentence = "".join(t["text"] for t in cur).strip()
-        if sentence:
-            sentences.append({
-                "start_ms": tok_ms(cur[0], "from"),
-                "end_ms": tok_ms(cur[-1], "to"),
-                "text": sentence,
+            tokens.append({
+                "text": text,
+                "start_ms": tok_ms(tok, "from"),
+                "end_ms": tok_ms(tok, "to"),
             })
     if cache_file is not None:
-        cache_file.write_text(json.dumps(sentences, ensure_ascii=False), encoding="utf-8")
-    return sentences
+        cache_file.write_text(json.dumps(tokens, ensure_ascii=False), encoding="utf-8")
+    return tokens
 
 
-def refine_segment_boundaries(segments: list[dict]) -> list[dict]:
-    """Split each whisper segment into sentences, interpolating timestamps
-    within the segment by character share."""
-    out = []
-    for seg in segments:
-        text = seg["text"].strip()
-        parts = [p.strip() for p in EN_SENTENCE_SPLIT.split(text) if p.strip()]
-        if len(parts) <= 1:
-            out.append(seg)
+def detect_speech_segments(wav: Path) -> list[tuple[int, int]]:
+    """Silence-based speech segmentation with the device player's
+    semantics: ≥800 ms of silence splits, <180 ms utterances dropped,
+    ±100 ms padding. The player no longer runs its own VAD — these are
+    the boundaries it will display and seek by, so they must sit on the
+    reader's actual pauses."""
+    proc = subprocess.run(
+        ["ffmpeg", "-i", str(wav), "-af", "silencedetect=noise=-35dB:d=0.8",
+         "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    silences: list[list[float]] = []
+    for line in (proc.stderr or "").splitlines():
+        m = re.search(r"silence_start: ([\d.]+)", line)
+        if m:
+            silences.append([float(m.group(1)), -1.0])
             continue
-        total = sum(len(p) for p in parts)
-        span = seg["end_ms"] - seg["start_ms"]
-        pos = seg["start_ms"]
-        for p in parts:
-            dur = int(span * len(p) / max(total, 1))
-            out.append({"start_ms": pos, "end_ms": pos + dur, "text": p})
-            pos += dur
+        m = re.search(r"silence_end: ([\d.]+)", line)
+        if m and silences and silences[-1][1] < 0:
+            silences[-1][1] = float(m.group(1))
+    total = silences[-1][1] if silences and silences[-1][1] > 0 else 0
+    if not total:
+        # Probe the real duration for the trailing-speech case.
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(wav)],
+            capture_output=True, text=True,
+        )
+        try:
+            total = float(out.stdout.strip())
+        except ValueError:
+            total = 0.0
+    speech: list[tuple[float, float]] = []
+    prev = 0.0
+    for s, e in silences:
+        if s - prev >= 0.18:
+            speech.append((prev, s))
+        prev = e if e > 0 else s
+    if total - prev >= 0.18:
+        speech.append((prev, total))
+    pad = 0.1
+    return [
+        (int(max(0.0, a - pad) * 1000), int(min(total, b + pad) * 1000))
+        for a, b in speech
+    ]
+
+
+def bucket_tokens_by_speech(
+    tokens: list[dict], speech: list[tuple[int, int]]
+) -> list[dict]:
+    """Group tokens into the speech segment their midpoint falls in.
+    Returns one entry per VAD segment: the segment's own boundaries
+    (the player seeks and loops by these) plus its text and tokens."""
+    out = []
+    for a, b in speech:
+        toks = [t for t in tokens if a <= (t["start_ms"] + t["end_ms"]) // 2 < b]
+        text = "".join(t["text"] for t in toks).strip()
+        if text:
+            out.append({"start_ms": a, "end_ms": b, "text": text, "tokens": toks})
     return out
+
+
+END_PUNCT = ".!?。！？"
+
+
+def split_bucket_on_punctuation(bucket: dict) -> list[dict]:
+    """One VAD segment can carry several transcript sentences when the
+    reader's pause was shorter than the 800 ms split. Re-split it on
+    sentence punctuation using the tokens inside the segment — token
+    timestamps stay accurate inside the segment."""
+    toks = bucket.get("tokens") or []
+    ends = sum(
+        1 for t in toks
+        if t["text"].strip().rstrip("”’\"'“‘）)…").endswith(tuple(END_PUNCT))
+    )
+    if ends <= 1 or not toks:
+        return [bucket]
+    out: list[dict] = []
+    cur: list[dict] = []
+    for t in toks:
+        cur.append(t)
+        if t["text"].strip().rstrip("”’\"'“‘）)…").endswith(tuple(END_PUNCT)):
+            text = "".join(x["text"] for x in cur).strip()
+            if text:
+                out.append({"start_ms": cur[0]["start_ms"], "end_ms": cur[-1]["end_ms"],
+                            "text": text, "tokens": cur})
+            cur = []
+    if cur:
+        text = "".join(x["text"] for x in cur).strip()
+        if text:
+            out.append({"start_ms": cur[0]["start_ms"], "end_ms": cur[-1]["end_ms"],
+                        "text": text, "tokens": cur})
+    return out or [bucket]
 
 
 # ----------------------------------------------------------------------------
@@ -410,27 +467,46 @@ def align_lesson(
     cache_dir: Path | None = None,
 ) -> bool:
     en_all, cn_all = lesson_sentence_pools(lesson)
-    segments = transcribe(audio_full, model, work, language, cache_dir)
-    if not segments:
+    tokens = transcribe_tokens(audio_full, model, work, language, cache_dir)
+    if not tokens:
         return False
+    wav = work / "audio16k.wav"
+    if not wav.is_file():
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(audio_full),
+             "-ar", "16000", "-ac", "1", str(wav)],
+            check=True,
+        )
+    speech = detect_speech_segments(wav)
+    if not speech:
+        return False
+    buckets = bucket_tokens_by_speech(tokens, speech)
+    if not buckets:
+        return False
+    # A bucket with several sentence endings is several sentences the
+    # 800 ms pause rule couldn't split — re-split on token punctuation.
+    units: list[dict] = []
+    for b in buckets:
+        units.extend(split_bucket_on_punctuation(b))
+
     if not en_all:
         # No transcript in the package (THINK exercise/video tracks): the
-        # ASR transcript *is* the text — write whisper's sentences with
-        # their own timestamps so the drill has something to show.
+        # ASR transcript *is* the text, timed on the pause boundaries.
         lesson["lines"] = [
-            {"en": s["text"].strip(), "cn": "",
-             "start_ms": s["start_ms"], "end_ms": s["end_ms"]}
-            for s in segments if s["text"].strip()
+            {"en": u["text"], "cn": "",
+             "start_ms": u["start_ms"], "end_ms": u["end_ms"]}
+            for u in units
         ]
         return bool(lesson["lines"])
-    matches = align_sentences(segments, [(e, "") for e in en_all])
-    spans = timestamps_for([(e, "") for e in en_all], segments, matches)
+
+    # Lesson text exists: NW-match units to lesson sentences. Matching
+    # only decides *which* canonical text a pause-boundary unit carries —
+    # the timings stay on the pause boundaries the player uses.
+    matches = align_sentences(units, [(e, "") for e in en_all])
+    spans = timestamps_for([(e, "") for e in en_all], units, matches)
     cns = pair_chinese_by_time(
         [(e, s, e2) for e, (s, e2) in zip(en_all, spans)], cn_all
     )
-    # Enforce monotonic, non-overlapping spans: interpolation between
-    # anchors can hand a sentence a start before its neighbour's end,
-    # which makes the player's current-sentence probe flicker.
     lines = []
     prev_end = 0
     for i in range(len(en_all)):
