@@ -218,82 +218,145 @@ def pair_chinese_by_time(
 # whisper transcription
 # ----------------------------------------------------------------------------
 
-def transcribe_tokens(audio_path: Path, model: Path, vad_model: Path, work: Path,
-                      language: str, cache_dir: Path | None) -> list[dict]:
-    """One whisper-cli pass with built-in Silero VAD: the audio is first
-    split on the reader's actual pauses, then each pause-boundary segment
-    is transcribed *independently* — so segment text is complete (no
-    cross-segment token drift) and segment boundaries sit on real
-    silences. Output: one entry per VAD segment with text, tokens and
-    millisecond offsets. Cache key carries v4 (VAD segments)."""
+def detect_speech_segments(wav: Path) -> list[tuple[float, float]]:
+    """Silence-based speech segmentation with the device player's
+    semantics: >=800 ms of silence splits, <180 ms utterances dropped,
+    +-100 ms padding."""
+    proc = subprocess.run(
+        ["ffmpeg", "-i", str(wav), "-af", "silencedetect=noise=-35dB:d=0.8",
+         "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    silences: list[list[float]] = []
+    for line in (proc.stderr or "").splitlines():
+        m = re.search(r"silence_start: ([\d.]+)", line)
+        if m:
+            silences.append([float(m.group(1)), -1.0])
+            continue
+        m = re.search(r"silence_end: ([\d.]+)", line)
+        if m and silences and silences[-1][1] < 0:
+            silences[-1][1] = float(m.group(1))
+    out = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(wav)],
+        capture_output=True, text=True,
+    )
+    try:
+        total = float(out.stdout.strip())
+    except ValueError:
+        total = 0.0
+    speech: list[tuple[float, float]] = []
+    prev = 0.0
+    for s, e in silences:
+        if s - prev >= 0.18:
+            speech.append((prev, s))
+        prev = e if e > 0 else s
+    if total - prev >= 0.18:
+        speech.append((prev, total))
+    pad = 0.1
+    return [
+        (max(0.0, a - pad), min(total, b + pad))
+        for a, b in speech
+    ]
+
+
+def start_whisper_server(model: Path, port: int) -> subprocess.Popen:
+    """Long-lived whisper.cpp HTTP server: the 547 MB model loads once and
+    every VAD segment then transcribes in a fraction of a second —
+    per-segment whisper-cli calls would each pay a 2-3 s model load."""
+    proc = subprocess.Popen(
+        ["/opt/homebrew/bin/whisper-server", "-m", str(model),
+         "--port", str(port), "--inference-path", "/inference"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    import time
+    for _ in range(60):
+        time.sleep(0.5)
+        try:
+            import urllib.request
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1)
+            return proc
+        except Exception:
+            if proc.poll() is not None:
+                break
+    proc.kill()
+    sys.exit("whisper-server failed to start")
+
+
+def stop_whisper_server(proc: subprocess.Popen) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+_SPECIAL_TOK = re.compile(r"^_.*_$|^\\[.*\\]$")
+
+
+def transcribe_segments(wav: Path, speech: list[tuple[float, float]],
+                        work: Path, model: Path, language: str,
+                        server_port: int, cache_dir: Path | None,
+                        cache_key: str) -> list[dict]:
+    """Transcribe each VAD segment independently through the whisper
+    server: clip the segment, POST it, take the text. Segment boundaries
+    come from the VAD (the reader's real pauses) and never from whisper
+    timestamps, which drift. Returns one unit per segment."""
     cache_file = None
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file = cache_dir / f"{sha256_file(audio_path)}.v4.json"
+        cache_file = cache_dir / f"{cache_key}.v5.json"
         if cache_file.is_file():
             return json.loads(cache_file.read_text(encoding="utf-8"))
-    wav = work / "audio16k.wav"
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(audio_path),
-         "-ar", "16000", "-ac", "1", str(wav)],
-        check=True,
-    )
-    out_prefix = work / "asr"
-    proc = subprocess.run(
-        ["whisper-cli", "-m", str(model), "-f", str(wav), "-ojf", "-of", str(out_prefix),
-         "-l", language, "-pp",
-         "--vad", "--vad-model", str(vad_model),
-         "--vad-threshold", "0.5",
-         "--vad-min-silence-duration-ms", "800",
-         "--vad-min-speech-duration-ms", "180",
-         "--vad-speech-pad-ms", "100"],
-        capture_output=True, text=True,
-    )
-    json_path = Path(f"{out_prefix}.json")
-    if not json_path.is_file():
-        sys.exit(f"whisper-cli produced no json (rc={proc.returncode}):\n{proc.stderr[-2000:]}")
-    data = json.loads(json_path.read_text(encoding="utf-8"))
 
-    def tok_ms(tok: dict, key: str) -> int:
-        stamp = tok["timestamps"][key]
-        h, m, rest = stamp.split(":")
-        s, ms = rest.split(",")
-        return ((int(h) * 60 + int(m)) * 60 + int(s)) * 1000 + int(ms)
+    special = re.compile(r"^_.*_$|^\[.*\]$")
 
-    segments: list[dict] = []
-    for seg in data.get("transcription", []):
-        text = (seg.get("text") or "").strip()
+    def clean(t: str) -> str:
+        return special.sub("", t)
+
+    import http.client
+    units: list[dict] = []
+    boundary = "----courseboxform"
+    for a, b in speech:
+        clip = work / "seg.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{a:.3f}",
+             "-to", f"{b:.3f}", "-i", str(wav), "-ar", "16000", "-ac", "1",
+             str(clip)],
+            check=True,
+        )
+        body = bytearray()
+        body += f"--{boundary}\r\n".encode()
+        body += b'Content-Disposition: form-data; name="file"; filename="seg.wav"\r\n'
+        body += b"Content-Type: audio/wav\r\n\r\n"
+        body += Path(clip).read_bytes()
+        body += f"\r\n--{boundary}--\r\n".encode()
+        conn = http.client.HTTPConnection("127.0.0.1", server_port, timeout=120)
+        conn.request("POST", "/inference", bytes(body), {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        })
+        payload = json.loads(conn.getresponse().read().decode("utf-8"))
+        conn.close()
+        text = clean(payload.get("text") or "").strip()
         if not text:
             continue
-        toks = []
-        for tok in seg.get("tokens") or []:
-            t = tok.get("text") or ""
-            if t.strip():
-                toks.append({"text": t,
-                             "start_ms": tok_ms(tok, "from"),
-                             "end_ms": tok_ms(tok, "to")})
-        off = seg.get("offsets") or {}
-        segments.append({
-            "start_ms": int(off.get("from", 0)),
-            "end_ms": int(off.get("to", 0)),
+        units.append({
+            "start_ms": int(a * 1000),
+            "end_ms": int(b * 1000),
             "text": text,
-            "tokens": toks,
         })
     if cache_file is not None:
-        cache_file.write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
-    return segments
-
-
+        cache_file.write_text(json.dumps(units, ensure_ascii=False), encoding="utf-8")
+    return units
 
 
 END_PUNCT = ".!?。！？"
 
 
 def split_bucket_on_punctuation(bucket: dict) -> list[dict]:
-    """One VAD segment can carry several transcript sentences when the
+    """One speech unit can carry several lesson sentences when the
     reader's pause was shorter than the 800 ms split. Re-split it on
-    sentence punctuation using the tokens inside the segment — token
-    timestamps stay accurate inside the segment."""
+    sentence punctuation using the unit's tokens."""
     toks = bucket.get("tokens") or []
     ends = sum(
         1 for t in toks
@@ -318,10 +381,6 @@ def split_bucket_on_punctuation(bucket: dict) -> list[dict]:
                         "text": text, "tokens": cur})
     return out or [bucket]
 
-
-# ----------------------------------------------------------------------------
-# Needleman–Wunsch fuzzy alignment
-# ----------------------------------------------------------------------------
 
 def align_sentences(
     asr: list[dict], text_pairs: list[tuple[str, str]], min_ratio: float = 0.5
@@ -363,7 +422,6 @@ def align_sentences(
                 score[i][j - 1] + gap,
             )
 
-    # Traceback: prefer diag (match/skip-pair), then up (text gap), then left.
     EPS = 1e-9
     match_of_text: list[int | None] = [None] * n
     i, j = n, m
@@ -384,7 +442,7 @@ def timestamps_for(
     asr: list[dict],
     matches: list[int | None],
 ) -> list[tuple[int, int]]:
-    """(start_ms, end_ms) per text sentence: matched → ASR times,
+    """(start_ms, end_ms) per text sentence: matched → unit times,
     otherwise interpolate between neighbouring matched anchors."""
     n = len(text_pairs)
     spans: list[tuple[int, int] | None] = [None] * n
@@ -398,7 +456,6 @@ def timestamps_for(
             last_end = spans[i][1]
             i += 1
             continue
-        # find next anchor
         k = i
         while k < n and spans[k] is None:
             k += 1
@@ -413,10 +470,6 @@ def timestamps_for(
         i = k
     return [s for s in spans if s is not None]
 
-
-# ----------------------------------------------------------------------------
-# per-lesson alignment
-# ----------------------------------------------------------------------------
 
 def tighten_span_to_text(unit_tokens: list[dict], sentence: str,
                          start: int, end: int) -> tuple[int, int]:
@@ -450,19 +503,40 @@ def tighten_span_to_text(unit_tokens: list[dict], sentence: str,
 
 def align_lesson(
     lesson: dict, audio_full: Path, model: Path, work: Path, language: str,
-    cache_dir: Path | None = None, vad_model: Path | None = None,
+    cache_dir: Path | None = None, server_port: int | None = None,
 ) -> bool:
     en_all, cn_all = lesson_sentence_pools(lesson)
-    vad = vad_model or (model.parent / "ggml-silero-v5.1.2.bin")
-    segments = transcribe_tokens(audio_full, model, vad, work, language, cache_dir)
+    wav = work / "audio16k.wav"
+    if not wav.is_file():
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(audio_full),
+             "-ar", "16000", "-ac", "1", str(wav)],
+            check=True,
+        )
+    speech = detect_speech_segments(wav)
+    if not speech:
+        return False
+    cache_key = sha256_file(audio_full)
+    segments = transcribe_segments(wav, speech, work, model, language,
+                                   server_port or 9100, cache_dir, cache_key)
     if not segments:
         return False
     # A VAD segment can carry several lesson sentences when the reader's
-    # pause was shorter than the 800 ms split — re-split on token
-    # punctuation (token timestamps are accurate inside one segment).
+    # pause was shorter than the 800 ms split — split it on punctuation
+    # in the segment text (boundary interpolated inside the segment).
     units: list[dict] = []
     for seg in segments:
-        units.extend(split_bucket_on_punctuation(seg))
+        parts = [p.strip() for p in EN_SENTENCE_SPLIT.split(seg["text"]) if p.strip()]
+        if len(parts) <= 1:
+            units.append(seg)
+            continue
+        total = sum(len(x) for x in parts)
+        span = seg["end_ms"] - seg["start_ms"]
+        pos = seg["start_ms"]
+        for x in parts:
+            dur = int(span * len(x) / max(total, 1))
+            units.append({"start_ms": pos, "end_ms": pos + dur, "text": x})
+            pos += dur
 
     if not en_all:
         # No transcript in the package (THINK exercise/video tracks): the
@@ -486,14 +560,6 @@ def align_lesson(
     prev_end = 0
     for i in range(len(en_all)):
         start, end = spans[i]
-        j = matches[i]
-        if j is not None:
-            # The matched unit may carry extra speech glued to the
-            # sentence (announcement + first sentence under one pause) —
-            # tighten to where the sentence's own words actually are.
-            start, end = tighten_span_to_text(
-                units[j].get("tokens") or [], en_all[i], start, end
-            )
         start = max(start, prev_end)
         end = max(end, start + 300)
         prev_end = end
@@ -535,6 +601,17 @@ def align_dir(unpack_dir: Path, out_zip: Path, model: Path, language: str,
 def _align_in_dir(unpack_dir: Path, out_zip: Path, model: Path, language: str,
                   course_id: str | None, limit: int | None,
                   cache_dir: Path | None) -> None:
+    server = start_whisper_server(model, 9100)
+    try:
+        _run_alignment(unpack_dir, out_zip, model, language, course_id,
+                       limit, cache_dir, 9100)
+    finally:
+        stop_whisper_server(server)
+
+
+def _run_alignment(unpack_dir: Path, out_zip: Path, model: Path, language: str,
+                   course_id: str | None, limit: int | None,
+                   cache_dir: Path | None, server_port: int) -> None:
     with tempfile.TemporaryDirectory(prefix="align-whisper-work-") as td:
         tmp = Path(td)
 
@@ -565,7 +642,8 @@ def _align_in_dir(unpack_dir: Path, out_zip: Path, model: Path, language: str,
             work = tmp / f"work-{lid}"
             work.mkdir(exist_ok=True)
             try:
-                ok = align_lesson(lesson, unpack_dir / obj, model, work, language, cache_dir)
+                ok = align_lesson(lesson, unpack_dir / obj, model, work, language,
+                                  cache_dir, server_port)
             except Exception as exc:
                 print(f"  fail {lid}: {exc}", file=sys.stderr)
                 ok = False
